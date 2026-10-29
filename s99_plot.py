@@ -1,5 +1,5 @@
 """Plot box and plot-level numbers: the box from the field inventory, every product clipped to it, and stand
-density and basal area from the manual trees.
+density and basal area from the segmented trees (manual or automatic, as edited in segfix).
 
 usage: s99_plot.py [PLOT ...] [--bounds] [--no-laz]          (--bounds with no PLOT also draws the check figure)
 
@@ -12,9 +12,9 @@ usage: s99_plot.py [PLOT ...] [--bounds] [--no-laz]          (--bounds with no P
 Clip (default), next to the full-extent products, which are kept:
   04_registered/<PLOT>_04_merged_2cm_plot.laz   05_ground/<PLOT>_05_dtm_1m_plot.tif, _05_chm_0.5m_plot.tif
   06_stems/<PLOT>_06_stems_plot.csv            automatic stems inside the box (they over-count and inflate DBH)
-  07_trees/<PLOT>_07_trees_vs_plot.csv         per manual tree (09_leafwood): centroid, share of points outside the box, status
+  07_trees/<PLOT>_07_trees_vs_plot.csv         per tree (09_leafwood): centroid, share of points outside the box, status
   99_meta/<PLOT>_99_plot_clip.json             areas, CHM cover, counts, and stems/ha, basal area and median DBH from the
-                                               manual trees whose centroid is inside (DBH from the sylva QSM, 08)
+                                               trees whose centroid is inside (DBH from the sylva QSM, 08)
 Voxel profiles are clipped by s10_canopy.py (--reprofile after the box changes).
 """
 import csv, glob, json, shutil, time

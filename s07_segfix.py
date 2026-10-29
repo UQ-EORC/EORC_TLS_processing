@@ -25,7 +25,8 @@ import   reads the saved project back: 07_trees/<PLOT>_07_trees_edited_tiles/*.l
          reclassified, noise). From then on the review and stages 08-09 read the edited labels and classes
          (project.tree_tiles); stage 09 keeps every point classed by hand and classifies only the unclassified ones.
          Refused while trees are not marked done, unless --allow-unfinished.
-Plots without manual trees have no transferred labels to start from; segment them first (e.g. `sylva trees --segment`
+Plots without manual trees start from the automatic segmentation of stage 07 instead (same tiles); before that existed
+they were segmented by hand first (e.g. `sylva trees --segment`
 on the height-normalised plot cloud) and import that file into segfix by hand.
 """
 import copy, json, os, sys, time
@@ -351,9 +352,9 @@ def done(site):
 
 if __name__ == "__main__":
     p = project.parser(__doc__, sites=False); p.add_argument("action", choices=["prepare", "add-classes", "status", "import"])
-    p.add_argument("sites", nargs="*", metavar="PLOT"); p.add_argument("--buffer", type=float, default=15.0)
+    p.add_argument("sites", nargs="*", metavar="PLOT", type=project.plot_name); p.add_argument("--buffer", type=float, default=15.0)
     p.add_argument("--force", action="store_true"); p.add_argument("--allow-unfinished", action="store_true"); a = p.parse_args()
-    # No plots given: every plot with manual trees (the others have no transferred labels to edit).
+    # No plots given: every plot with tree labels (manual trees or automatic segmentation).
     sites = a.sites or [s for s in project.plots() if project.has_trees(s)]
     if a.action == "prepare": ok = project.for_sites(prepare, sites, "07_segfix", buffer=a.buffer, force=a.force)
     elif a.action == "add-classes": ok = project.for_sites(add_classes, sites, "07_segfix")

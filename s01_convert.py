@@ -18,7 +18,7 @@ filtering: 0 single, 1 first, 2 interior, 3 last), gps_time, point_source_id (th
 <PLOT>_01_filter.txt and <PLOT>_01_manifest.json. Resumable: a scan whose LAZ exists for the same source file is skipped.
 A position with two scans gives ScanPosNNN and ScanPosNNN#2.
 """
-import json, os, re, time, traceback
+import os, re, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np

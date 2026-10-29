@@ -1,4 +1,4 @@
-"""Stages 08 (QSM) and 09 (leaf/wood) for the manual trees: a raycloudtools QSM and a sylva QSM per tree, and a sylva
+"""Stages 08 (QSM) and 09 (leaf/wood) for the labelled trees (manual or automatic, edited in segfix): a raycloudtools QSM and a sylva QSM per tree, and a sylva
 leaf/wood split with leaf angles and leaf area.
 
 usage: s08_tree_models.py [PLOT ...] [--workers=6] [--only=12,34] [--no-rct] [--no-sylva] [--limit=N] [--meshes-only]
@@ -393,7 +393,7 @@ def plot_meshes(site):
 
 
 def done(site):
-    """Whether stage 08 is finished for the plot (run.py then skips it): a plot without manual trees counts as done;
+    """Whether stage 08 is finished for the plot (run.py then skips it): a plot without tree labels counts as done;
     otherwise the manifest must hold its totals and be no older than the last segfix import."""
     m = project.jload(ROOT / site / "08_qsm" / f"{site}_08_models_manifest.json")
     if not project.has_trees(site): return True

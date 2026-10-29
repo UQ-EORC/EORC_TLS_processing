@@ -9,11 +9,11 @@ Steps, in order (each runs `python <script> PLOT` in its own process, so memory 
   04  s04_merge.py          2 cm registered merge
   05  s05_ground.py         ground, DTM, CHM (05), automatic stems (06), QC figures
   99b s99_plot.py --bounds  plot box from the field inventory (if not written yet)
-  07  s07_trees.py          manual trees onto the merge, review list (plots with manual trees)
+  07  s07_trees.py          tree labels on the merge: manual trees transferred, else automatic segmentation; review list
   07e s07_segfix.py         manual editing in segfix: the project is prepared, then the run stops for that plot until the
                             edit is imported (s07_segfix.py import PLOT). --skip-editing goes on with the transferred labels.
   08  s08_tree_models.py    QSMs (08), leaf/wood (09), plot meshes; redoes the trees changed in segfix
-  99  s99_plot.py           products clipped to the plot box, density and basal area from the manual trees
+  99  s99_plot.py           products clipped to the plot box, density and basal area from the segmented trees
   10  s10_canopy.py         voxels (10), gap profiles (11)
 A step that fails stops that plot (see 99_meta/<PLOT>_99_error_<step>.txt); the other plots go on.
 """
@@ -24,7 +24,7 @@ from project import ROOT, log
 import s01_convert, s02_shots, s03_registration, s04_merge, s05_ground, s07_trees, s07_segfix, s08_tree_models, s10_canopy, s99_plot
 
 
-# Predicates for STEPS' "applies" column: only plots with manual trees get 07, 07e and 08; only plots with .rxp get 02 and 10.
+# Predicates for STEPS' "applies" column: plots with tree labels (manual trees, or automatic segmentation unless segment_trees = false) get 07, 07e and 08; only plots with .rxp get 02 and 10.
 def has_trees(site): return bool(project.has_trees(site))
 def has_rxp(site): return project.has_rxp(site)   # no unpacked RiSCAN project with its .rxp scans: no pulses
 

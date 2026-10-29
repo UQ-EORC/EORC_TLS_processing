@@ -46,7 +46,7 @@ with the date and the sylva version.
 | 04 | `s04_merge.py` | `04_registered` | 2 cm voxel-thinned merge, tiles and one LAZ |
 | 05 | `s05_ground.py` | `05_ground`, `06_stems`, `90_qc` | DTM, CHM, automatic stems, QC figures |
 | 99b | `s99_plot.py --bounds` | `99_meta/*_plot_bounds` | plot box from the field stem map |
-| 07 | `s07_trees.py` | `07_trees` | manual trees carried onto the merge; review list |
+| 07 | `s07_trees.py` | `07_trees` | tree labels: manual trees carried onto the merge, else automatic segmentation from the 06 stems; review list |
 | 07e | `s07_segfix.py` | `07_trees/*_segfix`, `*_trees_edited_tiles` | manual editing in segfix (below) |
 | 08 | `s08_tree_models.py` | `08_qsm`, `09_leafwood` | raycloudtools and sylva QSMs, leaf/wood, plot meshes |
 | 99 | `s99_plot.py` | `*_plot` files, `99_meta/*_plot_clip.json` | products clipped to the plot box; density and basal area |
@@ -59,7 +59,8 @@ Stage folders sit in `<project>/<PLOT>/`, files are named `<PLOT>_<stage>_<what>
 Notes on the methods:
 - The canopy stages use every pulse. A point filter (reflectance floor, deviation cap) removes pulses whose echoes all
   fail it, which overstates gaps and understates plant area, so stage 02 reads the raw scans without one.
-- The automatic stems of stage 06 over-count and inflate DBH; plot density and basal area come from the manual trees.
+- The automatic stems of stage 06 over-count and inflate DBH; plot density and basal area come from the segmented trees
+  after editing, with DBH from their QSMs.
 - The gap-fraction PAI is not meaningful for low, sparse canopy and saturates in dense canopy; use the voxel PAI there.
 
 ## Manual editing in segfix
@@ -84,8 +85,11 @@ The transferred tree labels are a starting point; the edited ones are what stage
    changed and the leaf/wood split, leaf metrics and sylva QSM of trees whose classes changed (points classed by hand
    keep their class; the classifier fills in only the unclassified ones), drops removed trees, and redoes the plot totals.
 
-Plots without manual trees have no labels to start from: segment them first (for example `sylva trees --segment` on a
-height-normalised cloud) and open that file in segfix.
+Plots without manual trees start from an automatic segmentation (stage 07, `sylva.trees`): the stage-06 stems are grown
+into trees over the merge tiles within the plot box plus 15 m (`sylva.als.tiles.segment_trees`, tile by tile), branches
+of another stem merged and candidates under 3 m dropped. The stem finder over-counts and splits
+trees, so expect more editing than for transferred manual trees: merge split crowns, delete false stems (shrubs, logs),
+and check the trees the review list puts first. `segment_trees = false` in `project.toml` gives a plot no tree stages.
 
 ## Install
 

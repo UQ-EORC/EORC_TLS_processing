@@ -16,7 +16,6 @@ with registered = false. The report: pair residuals of 5 cm / 30 m samples of th
 03_registration/<PLOT>_03_registration_report.html and _registration_residuals.json.
 """
 import json, time
-from pathlib import Path
 import numpy as np
 import project
 from project import ROOT, log

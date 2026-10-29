@@ -18,7 +18,6 @@ The gap-profile PAI is not meaningful for low, sparse canopy (scanners standing 
 canopy: use the voxel PAI there. --reprofile redoes the voxel profile of a finished plot (e.g. after the plot box changed).
 """
 import json, os, shutil, subprocess, time, traceback
-from pathlib import Path
 import numpy as np
 import project
 from project import ROOT, log

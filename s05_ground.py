@@ -6,7 +6,7 @@ The 2 cm merge (04) is thinned to 5 cm (8 cm above 260 M points). Ground: the lo
 -0.3..+0.4 m of the cell's 1st percentile, 10 cm thinned) through sylva.ground.classify_ground_pmf (2 m cells, 40 m
 window); TIN DTM at 1 m with a support raster (plan distance to the nearest ground point); height above the DTM; CHM
 at 0.5 m. Stems: sylva.trees.detect_stems on the 0.5-3 m slab, with per-scan stem noise (sylva.quality.stem_noise).
-The automatic stems over-count and inflate DBH; plot basal area and density come from the manual trees (s99_plot.py).
+The automatic stems over-count and inflate DBH; plot basal area and density come from the segmented trees after editing (s99_plot.py).
   05_ground/<PLOT>_05_dtm_1m.tif, _dtm_support_1m.tif, _chm_0.5m.tif
   06_stems/<PLOT>_06_stems.csv
   90_qc/<PLOT>_90_qc_ground_dtm_chm.png, _ground_transect.png, _stems_slab.png, _qc_stem_noise.json

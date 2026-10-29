@@ -1,6 +1,9 @@
-"""Stage 07: manually segmented trees carried onto the 2 cm merge, and a review list for editing.
+"""Stage 07: tree labels on the 2 cm merge, from the manual trees or an automatic segmentation, and a review list for editing.
 
 usage: s07_trees.py [PLOT ...] [--review-only] [--r-label=0.05] [--r-grow=0.04] [--r-near=0.15] [--grow-passes=2] [--no-clusters]
+
+A plot with manual trees (manual_trees in project.toml) has them transferred; any other plot is segmented automatically
+(segment_trees = false in project.toml turns that off). Either way the labels then go to segfix for checking (07e).
 
 Transfer. The trees are one point cloud per tree (project.manual_tree_files: manual_trees, optionally listed in
 manual_trees_table), in the frame of the matrices in manual_trees_frame (default: the merge's own). Where the merge uses
@@ -10,12 +13,20 @@ point within r_grow of a labelled one and within r_near of any tree point takes 
 unlabelled canopy that sit inside one tree's crown are joined to it (attach_clusters).
   07_trees/<PLOT>_07_merged_2cm_treeid_tiles/, <PLOT>_07_merged_2cm_treeid.laz   treeid per point (0 = no tree)
   07_trees/<PLOT>_07_trees.csv, <PLOT>_07_transfer.json                         per-tree counts and fit
+Segmentation. The stems of stage 06 within the plot box plus 15 m grow into trees over the merge tiles, heights above the
+stage-05 DTM, with sylva's tiled segmentation (sylva.als.tiles.segment_trees: merge_branches, segment_trees,
+tree_heights, prune_trees, tile by tile with a buffer). Candidates that are branches of another stem are merged, those
+under 3 m dropped.
+  07_trees/<PLOT>_07_merged_2cm_treeid_tiles/, <PLOT>_07_merged_2cm_treeid.laz   treeid per point (0 = no tree)
+  07_trees/<PLOT>_07_trees.csv, <PLOT>_07_segmentation.json                     per-tree stem, height, points; settings
+  (the stem DBH there is the stage-06 fit, not a measurement to use: tree DBH comes from the stage-08 QSM)
+The stem finder over-counts and splits some trees; the segfix edit (07e) is where that is corrected.
 Review. For each tree, the unlabelled points more than 1 m above the local floor inside its crown envelope (plan hull of
 its points above 30 % of its height), from the current labels (project.tree_tiles: the segfix edit once imported):
   07_trees/<PLOT>_07_review.csv (most affected first), <PLOT>_07_review_top3.png
 The review list says where to start in segfix (s07_segfix.py).
 """
-import csv, json, time
+import csv, time
 from pathlib import Path
 import numpy as np
 import project
@@ -271,6 +282,83 @@ def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, cluste
     project.jsave(summary, out / f"{site}_07_transfer.json"); project.record_run(site, "07_transfer", labelled=summary["labelled_points"], trees=len(bounds))
     log(f"{site}: {summary['labelled_points']:,} of {n_total:,} points labelled ({n_grown:,} grown, {n_clustered:,} as clusters); median fit {summary['median_fit_cm']:.1f} cm")
 
+# Automatic segmentation settings. margin: metres around the plot box segmented too, so trees leaning in or out of the box
+# are whole; buffer: the band of neighbouring tiles each tile is segmented with (wider than the largest crown; sylva widens
+# it up to max_buffer where crowns reach its edge); min_height: candidates lower than this are dropped (sylva's default).
+SEGMENT = dict(margin=15.0, buffer=20.0, max_buffer=60.0, min_height=3.0)
+
+
+def read_stems(site):
+    """The automatic stems of stage 06 (06_stems/<PLOT>_06_stems.csv) as sylva Tree objects, with their ids."""
+    from sylva.trees import Tree
+    out = []
+    for r in csv.DictReader(open(ROOT / site / "06_stems" / f"{site}_06_stems.csv")):
+        f = lambda k, d=float("nan"): float(r[k]) if r.get(k) not in (None, "", "nan") else d
+        out.append(Tree(int(r["tree_id"]), f("x"), f("y"), dbh=f("dbh"), n_points=int(f("n_points", 0)), rmse=f("rmse"),
+                        lean_deg=f("lean_deg"), quality=f("quality")))
+    return out
+
+
+def segment(site, margin, buffer, max_buffer, min_height, workers=None):
+    """Tree labels for a plot without manual trees: the stage-06 stems grown into trees over the 2 cm merge.
+
+    sylva's tiled segmentation (sylva.als.tiles.segment_trees) on the merge tiles that touch the plot box plus margin,
+    height-normalised with the stage-05 DTM: stem candidates that are branches of another are merged, each stem grows
+    into its tree by least-cost paths through a 3 cm graph of the points, heights are measured and candidates under
+    min_height or duplicated are dropped (prune). It gives the labels the whole-plot sequence would, tile by tile. Only
+    stems within the box plus margin seed trees. Every point then has a tree id or none (sylva's -1, written 0 here: -1
+    means noise in segfix). The labels are written onto copies of the merge tiles exactly as transfer() writes them, so
+    the review, segfix and stage 08 treat both alike. The normalised and segmented tiles are temporary (SCRATCH/segment).
+    """
+    import shutil, warnings
+    from sylva import io
+    from sylva.als import catalogue, tiles as stiles
+    t0 = time.time(); out = project.stage(site, "07_trees")
+    x0, y0, x1, y1 = project.plot_bounds(site); lo = (x0 - margin, y0 - margin); hi = (x1 + margin, y1 + margin)
+    every = sorted(Tiles(site).cat.tiles, key=lambda t: t.path)
+    use = [t for t in every if not (t.bounds[3] < lo[0] or t.bounds[0] > hi[0] or t.bounds[4] < lo[1] or t.bounds[1] > hi[1])]
+    stems = [s for s in read_stems(site) if lo[0] <= s.x <= hi[0] and lo[1] <= s.y <= hi[1]]
+    tmp = project.SCRATCH / "segment" / site
+    if tmp.exists(): shutil.rmtree(tmp)
+    log(f"{site}: segmenting {len(use)} of {len(every)} tiles from {len(stems)} stem candidates within the plot box + {margin:g} m")
+    # heights above the DTM of stage 05, so the trees stand on the same ground as the rest of the products
+    norm = stiles.normalize(catalogue.catalog([str(t.path) for t in use]), tmp / "normalised", dtm=project.load_dtm(site), workers=workers)
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        found, seg = stiles.segment_trees(norm, stems, tmp / "segmented", buffer=buffer, max_buffer=max_buffer,
+                                          prune={"min_height": min_height}, attribute="tree_id", workers=workers)
+    for w in warned: log(f"{site}: sylva: {w.message}")
+    log(f"{site}: {len(found)} trees ({time.time() - t0:.0f} s)")
+    # the labels onto copies of the merge tiles: same points, same order, checked
+    by_name = {Path(t.path).name: t.path for t in seg.tiles}
+    tdir = out / f"{site}_07_merged_2cm_treeid_tiles"
+    if tdir.exists(): shutil.rmtree(tdir)
+    tdir.mkdir(); outs = []; n_total = n_lab = 0
+    for t in every:
+        c = io.read(str(t.path)); lab = np.zeros(len(c), np.int32); n_total += len(c); name = Path(t.path).name
+        if name in by_name:
+            sc = io.read(str(by_name[name]), attrs=["tree_id"])
+            if len(sc) != len(c) or not np.allclose(sc.xyz, c.xyz, atol=1e-3):
+                raise RuntimeError(f"{site}: segmented tile {name} does not hold the merge tile's points in order")
+            lab = np.maximum(sc.attrs["tree_id"].astype(np.int32), 0)
+        n_lab += int((lab > 0).sum())
+        p = tdir / name; io.write(c.with_attrs(treeid=lab.astype(np.uint32)), str(p)); outs.append(str(p))
+    io.write_concat(outs, str(out / f"{site}_07_merged_2cm_treeid.laz"))
+    shutil.rmtree(tmp)
+    with open(out / f"{site}_07_trees.csv", "w", newline="") as f:
+        # stem_dbh_06 is the stage-06 circle fit, inflated on multi-stem clumps and shrubs; the tree DBH is the stage-08 QSM's
+        w = csv.writer(f); w.writerow(["treeid", "x", "y", "stem_dbh_06", "height", "n_points", "stem_quality", "crown_at_edge"])
+        for t in found:
+            w.writerow([t.tree_id, f"{t.x:.3f}", f"{t.y:.3f}", f"{t.dbh:.3f}", f"{t.height:.2f}", t.n_points, f"{t.quality:.3f}",
+                        int(bool(t.extra.get("crown_at_edge")))])
+    summary = {"site": site, "method": "sylva.als.tiles.segment_trees (merge_branches, segment_trees, tree_heights, prune_trees) from the stage-06 stems",
+               "stem_candidates": len(stems), "trees": len(found), "merged_points": n_total, "labelled_points": n_lab,
+               "tiles_segmented": len(use), "area": {"xmin": lo[0], "ymin": lo[1], "xmax": hi[0], "ymax": hi[1]},
+               "settings": {"margin": margin, "buffer": buffer, "max_buffer": max_buffer, "min_height": min_height},
+               "warnings": [str(w.message) for w in warned], "sylva": project.sylva_version(), "seconds": round(time.time() - t0)}
+    project.jsave(summary, out / f"{site}_07_segmentation.json"); project.record_run(site, "07_segmentation", trees=len(found), labelled=n_lab)
+    log(f"{site}: {n_lab:,} of {n_total:,} points labelled into {len(found)} trees ({summary['seconds']} s)")
+
 
 def review(site):
     """Rank the trees by how much unlabelled canopy lies inside their crown envelope: where to start editing in segfix.
@@ -346,14 +434,19 @@ def run(site, review_only=False, **kw):
     Plots without manual trees are skipped. With review_only, the review is redone on the current labels (e.g. after a
     segfix import) without touching the transferred ones.
     """
-    if not project.has_trees(site): log(f"{site}: no manual trees; nothing to transfer"); return
-    if not review_only: transfer(site, **kw)
+    if not project.has_trees(site): log(f"{site}: no manual trees and segment_trees = false; no tree labels"); return
+    if not review_only:
+        if project.has_manual_trees(site): transfer(site, **kw)
+        else: segment(site, **SEGMENT)
     review(site)
 
 
 def done(site):
-    """Whether stage 07 has completed for the plot (transfer record and review list exist); always true without manual trees."""
-    return not project.has_trees(site) or ((ROOT / site / "07_trees" / f"{site}_07_transfer.json").exists() and (ROOT / site / "07_trees" / f"{site}_07_review.csv").exists())
+    """Whether stage 07 has completed for the plot (transfer or segmentation record, and the review list, exist); always true
+    for a plot that gets no tree labels."""
+    d = ROOT / site / "07_trees"
+    record = d / (f"{site}_07_transfer.json" if project.has_manual_trees(site) else f"{site}_07_segmentation.json")
+    return not project.has_trees(site) or (record.exists() and (d / f"{site}_07_review.csv").exists())
 
 
 if __name__ == "__main__":

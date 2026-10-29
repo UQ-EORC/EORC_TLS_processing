@@ -54,7 +54,7 @@ RCT_SIF = str(_path(_paths["raycloudtools_sif"])) if "raycloudtools_sif" in _pat
 PYARROW_PYTHON = str(_path(_paths["pyarrow_python"])) if "pyarrow_python" in _paths else sys.executable
 # per-plot settings and their defaults: [defaults] in project.toml overrides these, [plots.<NAME>] overrides both (setting())
 DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter": None, "unregistered": [], "no_prior": [], "previous_transforms": None,
-            "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
+            "segment_trees": True, "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
             "inventory_x": "x", "inventory_y": "y", "code": None, "name": None}
 DEFAULTS.update(CONFIG.get("defaults", {}))
 # the plot box (m): nominal side, how far field stems may lie outside it, the distance beyond which a stem counts as isolated
@@ -74,9 +74,16 @@ def setting(plot, key):
 
 
 # setting_path: a per-plot setting read as a path (see _path: {plot} filled in, relative to the root), None if unset.
-# has_trees: whether the plot has manually segmented trees (the manual_trees setting); stages 07 and 08 need them.
 def setting_path(plot, key): return _path(setting(plot, key), plot)
-def has_trees(plot): return bool(setting(plot, "manual_trees"))
+
+
+# has_manual_trees: whether the plot has manually segmented trees (the manual_trees setting), which stage 07 transfers.
+def has_manual_trees(plot): return bool(setting(plot, "manual_trees"))
+
+
+# has_trees: whether the plot gets tree labels and so stages 07, 07e and 08: its manual trees, else an automatic
+# segmentation unless segment_trees = false.
+def has_trees(plot): return has_manual_trees(plot) or bool(setting(plot, "segment_trees"))
 
 
 def riscan_dir(plot):

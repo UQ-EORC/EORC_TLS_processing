@@ -14,7 +14,8 @@ source = "riscan"                       # riscan: the RiSCAN PRO project in <PLO
 registration = "sop"                    # sop: the project's SOP matrices; coreg: sylva.coreg from them; previous: previous_transforms
 # filter = "filters/point_filter.txt"   # point filter file (range, reflectance, deviation, amplitude, omit); none by default
 # previous_transforms = "{plot}/03_registration/delivered_transforms.json"   # scans[].name, world_from_scan (4x4)
-# manual_trees = "../trees/{plot}"      # one point cloud per tree (.ply/.las/.laz); the plot gets stages 07-09
+# manual_trees = "../trees/{plot}"      # one point cloud per tree (.ply/.las/.laz), transferred in stage 07
+segment_trees = true                    # plots without manual trees are segmented automatically (stage 07); false: no tree stages
 # manual_trees_table = "../trees/{plot}/trees.csv"   # columns treeid, file (relative to manual_trees); else id = last number in the name
 # manual_trees_frame = "{plot}/03_registration/delivered_dat"   # .DAT matrices the trees were made in (default: the merge's)
 # inventory = "../inventory/{plot}.csv"  # field stem map, for the plot box
