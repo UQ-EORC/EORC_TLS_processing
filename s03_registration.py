@@ -1,29 +1,30 @@
 """Stage 03: the scan matrices, optionally refined with sylva.coreg, and a registration report.
 
-usage: s03_registration.py [SITE ...] [--report-only] [--workers=N]
+usage: s03_registration.py [PLOT ...] [--report-only] [--workers=N]
 
-The matrix set per plot is chosen in tern.SITES ("registration"):
-  export  03_transforms.json and 03_transforms_dat/ from RiSCAN_OUTPUTS/<SITE>/PRCS (refused when the PRCS folder mixes
+The matrix set per plot is chosen in project.plots() ("registration"):
+  export  03_transforms.json and 03_transforms_dat/ from RiSCAN_OUTPUTS/<PLOT>/PRCS (refused when the PRCS folder mixes
           frames, i.e. holds geocentric matrices)
   coreg   as export, then sylva.coreg from those priors (scans in "no_prior" get none, so a broken export matrix cannot
           anchor them): 03_coreg_dat/, _coreg_transforms.json, _coreg_report.txt, _coreg_before_after.json,
           _registration_report_coreg.html. Every later stage uses 03_coreg_dat where it exists.
-  tern    the TERN processing's matrices (03_transforms_rxp_run.json), renumbered to the stage-01 scan indices
+  previous  matrices delivered with the data (previous_transforms: a transforms JSON with scans[].name and world_from_scan),
+          renumbered to the stage-01 scan indices; for plots whose export matrices are unusable
 One record per stage-01 scan; a position with two export files shares its matrix. Scans listed in "unregistered" are kept
 with registered = false. The report: pair residuals of 5 cm / 30 m samples of the scans at the matrices the merge uses,
-03_registration/<SITE>_03_registration_report.html and _registration_residuals.json.
+03_registration/<PLOT>_03_registration_report.html and _registration_residuals.json.
 """
 import json, time
 from pathlib import Path
 import numpy as np
-import tern
-from tern import EXPORTS, ROOT, log
+import project
+from project import EXPORTS, ROOT, log
 from s01_convert import jobs_for
 
 
 def write_transforms(site, scans, matrices_from, skipped, missing):
-    reg = tern.stage(site, "03_registration")
-    tern.jsave({"reference": 0, "matrices_from": matrices_from, "frame": "project coordinates (PRCS)", "omitted_positions": sorted(skipped),
+    reg = project.stage(site, "03_registration")
+    project.jsave({"reference": 0, "matrices_from": matrices_from, "frame": "project coordinates (PRCS)", "omitted_positions": sorted(skipped),
                 "scans_without_matrix": missing, "scans": scans}, reg / f"{site}_03_transforms.json")
     unreg = [s["name"] for s in scans if not s["registered"]]
     (reg / f"{site}_03_transforms_notes.txt").write_text(
@@ -36,37 +37,39 @@ def write_transforms(site, scans, matrices_from, skipped, missing):
 def build_export(site):
     prcs = {f.stem: np.loadtxt(f) for f in (EXPORTS / site / "PRCS").glob("*.DAT")}
     far = sorted(n for n, m in prcs.items() if np.abs(m[:3, 3]).max() > 1e5)
-    if far: raise ValueError(f"{site}: {len(far)} PRCS matrices are geocentric ({far[:4]}...); use registration='tern' or 'coreg'")
-    _, jobs, skipped = jobs_for(site); unreg = set(tern.setting(site, "unregistered", ()))
+    if far: raise ValueError(f"{site}: {len(far)} PRCS matrices are geocentric ({far[:4]}...); use registration = 'previous' or 'coreg'")
+    _, jobs, skipped = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
     scans, missing = [], []
     for _, name, src, _, index in jobs:
         pos = name.split("#")[0]
         if pos not in prcs: missing.append(name); continue
         scans.append({"index": index, "name": name, "source": src, "registered": name not in unreg, "world_from_scan": prcs[pos].tolist()})
     write_transforms(site, scans, f"{EXPORTS / site / 'PRCS'} (RiSCAN PRO export)", skipped, missing)
-    dat = tern.stage(site, "03_registration") / f"{site}_03_transforms_dat"; dat.mkdir(exist_ok=True)
+    dat = project.stage(site, "03_registration") / f"{site}_03_transforms_dat"; dat.mkdir(exist_ok=True)
     for f in dat.glob("*.DAT"): f.unlink()
     for n, m in prcs.items(): np.savetxt(dat / f"{n}.DAT", m, fmt="%.16f")
 
 
-def build_tern(site):
-    rx = json.load(open(ROOT / site / "03_registration" / f"{site}_03_transforms_rxp_run.json"))
-    M = {x["name"]: x for x in rx["scans"]}; _, jobs, skipped = jobs_for(site); unreg = set(tern.setting(site, "unregistered", ()))
+def build_previous(site):
+    src = project.setting_path(site, "previous_transforms")
+    if src is None: raise ValueError(f"{site}: registration = 'previous' needs previous_transforms in project.toml")
+    rx = json.load(open(src))
+    M = {x["name"]: x for x in rx["scans"]}; _, jobs, skipped = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
     scans, missing = [], []
     for _, name, src, _, index in jobs:
         x = M.get(name) or M.get(name.split("#")[0])
         if x is None: missing.append(name); continue
         scans.append({"index": index, "name": name, "source": x.get("source", src), "registered": bool(x.get("registered", True)) and name not in unreg,
                       "world_from_scan": x["world_from_scan"]})
-    write_transforms(site, scans, "the TERN processing registration (03_transforms_rxp_run.json), indices of the stage-01 scans", skipped, missing)
+    write_transforms(site, scans, f"previous registration ({src}), indices of the stage-01 scans", skipped, missing)
 
 
 def thinned(site, name):
     """A 5 cm, 30 m scanner-frame sample of a stage-01 scan, cached in SCRATCH/thin."""
-    p = tern.SCRATCH / "thin" / site / f"{name}.npy"
+    p = project.SCRATCH / "thin" / site / f"{name}.npy"
     if p.exists(): return np.load(p)
     from sylva import io, filters, PointCloud
-    c = io.read(str(tern.scan_laz(site, name)))
+    c = io.read(str(project.scan_laz(site, name)))
     xyz = filters.voxel_downsample(PointCloud(c.xyz[np.linalg.norm(c.xyz, axis=1) < 30.0]), 0.05).xyz
     p.parent.mkdir(parents=True, exist_ok=True); np.save(p, xyz); return xyz
 
@@ -87,9 +90,9 @@ def coreg(site, workers=None):
     import sylva
     from sylva import coreg as sc, riscan
     from sylva.registration_report import write_report
-    reg = ROOT / site / "03_registration"; t0 = time.time(); no_prior = set(tern.setting(site, "no_prior", ()))
+    reg = ROOT / site / "03_registration"; t0 = time.time(); no_prior = set(project.setting(site, "no_prior"))
     tj = json.load(open(reg / f"{site}_03_transforms.json"))
-    names = [x["name"] for x in tj["scans"] if x.get("registered", True) and tern.scan_laz(site, x["name"]).exists()]
+    names = [x["name"] for x in tj["scans"] if x.get("registered", True) and project.scan_laz(site, x["name"]).exists()]
     proj = sylva.read_riscan_project(str(next((ROOT / site / "00_raw").glob("*.RiSCAN"))))
     pos = {p.name: p for p in proj.with_scans(require_sop=False)}
     pd = reg / f"{site}_03_transforms_dat"; priors, levelling, reflectors, gnss = [], [], [], []
@@ -109,7 +112,7 @@ def coreg(site, workers=None):
     ref = next(k for k, p in enumerate(priors) if p is not None); cfg.reference_scan = ref
     project_from_world = priors[ref].copy()
     priors = [None if p is None else np.linalg.inv(project_from_world) @ p for p in priors]
-    files = [str(tern.scan_laz(site, n)) for n in names]
+    files = [str(project.scan_laz(site, n)) for n in names]
     result = sc.coregister(files, cfg, names=names, levelling=levelling, reflectors=reflectors,
                            approximate_positions=g if (g is not None and np.isfinite(g).any()) else None, priors=priors)
     result.save(reg / f"{site}_03_coreg_transforms.json"); (reg / f"{site}_03_coreg_report.txt").write_text(result.report() + "\n")
@@ -119,7 +122,7 @@ def coreg(site, workers=None):
     for f in cd.glob("*.DAT"): f.unlink()
     T = {k: project_from_world @ result.transform_for(k) for k in idx}
     for k in idx: np.savetxt(cd / f"{names[k]}.DAT", T[k], fmt="%.16f")
-    tern.jsave({"frame": f"project frame of {pd.name}; world_from_scan = prior(reference) @ coreg pose", "reference": names[ref],
+    project.jsave({"frame": f"project frame of {pd.name}; world_from_scan = prior(reference) @ coreg pose", "reference": names[ref],
                 "scans": [{"name": names[k], "world_from_scan": T[k].tolist()} for k in idx]}, reg / f"{site}_03_coreg_transforms_project_frame.json")
     clouds = [sylva.PointCloud(thinned(site, names[k])) for k in idx]; nm = [names[k] for k in idx]
     before = [np.loadtxt(pd / f"{n.split('#')[0]}.DAT") if (pd / f"{n.split('#')[0]}.DAT").exists() else None for n in nm]
@@ -128,7 +131,7 @@ def coreg(site, workers=None):
         ok = [i for i, t in enumerate(Ts) if t is not None]
         summary[tag] = residual_summary([clouds[i] for i in ok], [Ts[i] for i in ok], [nm[i] for i in ok])
         log(f"{site}: {tag}: pair medians median {summary[tag]['median_cm']} cm, p90 {summary[tag]['p90_cm']}, worst {summary[tag]['worst_cm']}")
-    tern.jsave(summary, reg / f"{site}_03_coreg_before_after.json")
+    project.jsave(summary, reg / f"{site}_03_coreg_before_after.json")
     if len(idx) >= 2:
         write_report(reg / f"{site}_03_registration_report_coreg.html", clouds, [T[k] for k in idx], nm, neighbours=4, search=1.0, voxel=0.05,
                      tolerance=0.10, worst=3, title=f"{site}: registration after sylva.coreg (priors: {pd.name})")
@@ -137,23 +140,23 @@ def coreg(site, workers=None):
 def report(site):
     import sylva
     from sylva.registration_report import write_report
-    t0 = time.time(); reg = ROOT / site / "03_registration"; M, src = tern.matrices(site)
-    names = sorted(n for n in M if tern.scan_laz(site, n).exists())
+    t0 = time.time(); reg = ROOT / site / "03_registration"; M, src = project.matrices(site)
+    names = sorted(n for n in M if project.scan_laz(site, n).exists())
     clouds = [sylva.PointCloud(thinned(site, n)) for n in names]; T = [M[n] for n in names]
     summary = {"site": site, "matrices": src, "scans": len(names), **residual_summary(clouds, T, names), "seconds": round(time.time() - t0)}
     write_report(reg / f"{site}_03_registration_report.html", clouds, T, names, neighbours=4, search=1.0, voxel=0.05, tolerance=0.10, worst=3,
                  title=f"{site}: registration at {src}")
-    tern.jsave(summary, reg / f"{site}_03_registration_residuals.json")
+    project.jsave(summary, reg / f"{site}_03_registration_residuals.json")
     log(f"{site}: {len(names)} scans, {summary['pairs']} pairs: pair medians median {summary['median_cm']} cm, p90 {summary['p90_cm']}, worst {summary['worst_cm']}")
     return summary
 
 
 def run(site, report_only=False, workers=None):
-    mode = tern.setting(site, "registration", "export")
+    mode = project.setting(site, "registration")
     if not report_only:
-        build_tern(site) if mode == "tern" else build_export(site)
+        build_previous(site) if mode == "previous" else build_export(site)
         if mode == "coreg": coreg(site, workers)
-    s = report(site); tern.record_run(site, "03_registration", mode=mode, median_cm=s["median_cm"], worst_cm=s["worst_cm"])
+    s = report(site); project.record_run(site, "03_registration", mode=mode, median_cm=s["median_cm"], worst_cm=s["worst_cm"])
 
 
 def done(site): return (ROOT / site / "03_registration" / f"{site}_03_registration_residuals.json").exists()
@@ -161,6 +164,6 @@ def done(site): return (ROOT / site / "03_registration" / f"{site}_03_registrati
 
 if __name__ == "__main__":
     import matplotlib; matplotlib.use("Agg")
-    p = tern.parser(__doc__); p.add_argument("--report-only", action="store_true"); p.add_argument("--workers", type=int, default=None)
+    p = project.parser(__doc__); p.add_argument("--report-only", action="store_true"); p.add_argument("--workers", type=int, default=None)
     a = p.parse_args()
-    tern.for_sites(run, a.sites, "03", report_only=a.report_only, workers=a.workers)
+    project.for_sites(run, a.sites, "03", report_only=a.report_only, workers=a.workers)

@@ -1,23 +1,23 @@
 """Stage 02 pulses: every pulse of every registered scan, unfiltered, for the canopy stages (09 voxels, 10 gap profiles).
 
-usage: s02_shots.py [SITE ...] [--workers=4] [--dry-run]
+usage: s02_shots.py [PLOT ...] [--workers=4] [--dry-run]
 
 The RiSCAN exports carry no pulse timing, so the pulses are read from the raw .rxp in 00_raw (the RiSCAN project),
 with missed pulses rebuilt from the scan pattern (sylva.io.read_rxp_shots, fill_missing). No point filter: every echo
-is kept except those closer than 0.5 m (the scanner head). The TERN point filter (reflectance floor, deviation cap) drops
-a quarter to a half of the pulses that hit something, which overstates gaps and understates plant area.
+is kept except those closer than 0.5 m (the scanner head). A point filter (reflectance floor, deviation cap) removes
+every pulse whose echoes all fail it, which overstates gaps and understates plant area.
 Each scan of 03_transforms.json is matched to its .rxp by position and by the time stamp in its source file name.
 
-  02_shots/<SITE>_02_<scan>_shots.parquet   scanner frame, all echoes >= 0.5 m, misses included;
+  02_shots/<PLOT>_02_<scan>_shots.parquet   scanner frame, all echoes >= 0.5 m, misses included;
                                             echo attributes reflectance, amplitude, deviation
-  02_shots/<SITE>_02_shots_manifest.json    per-scan counts. Resumable. A Warra scan took 12.5 GB per worker.
+  02_shots/<PLOT>_02_shots_manifest.json    per-scan counts. Resumable. A dense scan can take over 12 GB per worker.
 """
 import json, os, re, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
-import tern
-from tern import ROOT, log
+import project
+from project import ROOT, log
 
 MIN_RANGE = 0.5
 STAMP = re.compile(r"\d{6}_\d{6}")
@@ -79,15 +79,15 @@ def run(site, workers=4, dry=False):
     jobs, bad = jobs_for(site)
     log(f"{site}: {len(jobs)} scans matched to an rxp, {len(bad)} not: {bad[:5]}")
     if dry: return jobs, bad
-    out = tern.stage(site, "02_shots"); mf = out / f"{site}_02_shots_manifest.json"
-    man = tern.jload(mf) or {"site": site, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
+    out = project.stage(site, "02_shots"); mf = out / f"{site}_02_shots_manifest.json"
+    man = project.jload(mf) or {"site": site, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
                              "filter": f"none: every echo at range >= {MIN_RANGE} m", "scans": {}}
     man["unmatched"] = bad
     todo = [j for j in jobs if "error" in man["scans"].get(j[1], {"error": 1}) or not shots_file(site, j[1]).exists()]
     log(f"{site}: {len(todo)} scans to convert"); t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, (name, res) in enumerate(pool.map(convert_one, todo), 1):
-            man["scans"][name] = res; tern.jsave(man, mf)
+            man["scans"][name] = res; project.jsave(man, mf)
             if "error" in res: log(f"{site}: {name}: ERROR {res['error'][:120]}")
             elif k % 10 == 0 or k == len(todo):
                 log(f"{site}: {k}/{len(todo)} {name}: {res['pulses_written']:,} pulses, {res['echoes_written']:,} echoes ({(time.time() - t0) / 60:.0f} min)")
@@ -95,16 +95,16 @@ def run(site, workers=4, dry=False):
     man["totals"] = {"scans": len(ok), "pulses_written": sum(v["pulses_written"] for v in ok), "echoes_written": sum(v["echoes_written"] for v in ok),
                      "misses": sum(v["misses_reconstructed"] for v in ok), "gb": round(sum(v["parquet_mb"] for v in ok) / 1000, 1),
                      "errors": sum("error" in v for v in man["scans"].values())}
-    tern.jsave(man, mf); tern.record_run(site, "02_shots", **man["totals"])
+    project.jsave(man, mf); project.record_run(site, "02_shots", **man["totals"])
     if man["totals"]["errors"]: raise RuntimeError(f"{site}: {man['totals']['errors']} scans failed; see {mf.name}")
 
 
 def done(site):
-    t = (tern.jload(ROOT / site / "02_shots" / f"{site}_02_shots_manifest.json") or {}).get("totals")
+    t = (project.jload(ROOT / site / "02_shots" / f"{site}_02_shots_manifest.json") or {}).get("totals")
     return bool(t) and t.get("errors", 1) == 0
 
 
 if __name__ == "__main__":
-    p = tern.parser(__doc__); p.add_argument("--workers", type=int, default=4); p.add_argument("--dry-run", action="store_true")
+    p = project.parser(__doc__); p.add_argument("--workers", type=int, default=4); p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
-    tern.for_sites(run, a.sites, "02_shots", workers=a.workers, dry=a.dry_run)
+    project.for_sites(run, a.sites, "02_shots", workers=a.workers, dry=a.dry_run)

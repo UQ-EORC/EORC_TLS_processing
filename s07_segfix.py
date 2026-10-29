@@ -1,22 +1,22 @@
 """Stage 07, manual editing: the tree labels corrected by hand in segfix (https://pypi.org/project/segfix/).
 
-usage: s07_segfix.py prepare [SITE ...] [--buffer=15] [--force]
-       s07_segfix.py status  [SITE ...]
-       s07_segfix.py import  [SITE ...] [--allow-unfinished]
+usage: s07_segfix.py prepare [PLOT ...] [--buffer=15] [--force]
+       s07_segfix.py status  [PLOT ...]
+       s07_segfix.py import  [PLOT ...] [--allow-unfinished]
 
-prepare  writes a segfix project from the transferred labels (07_trees/<SITE>_07_merged_2cm_treeid_tiles):
-           07_trees/<SITE>_07_segfix/<SITE>_07_segfix.las   every labelled point, and the unlabelled points inside the plot box
+prepare  writes a segfix project from the transferred labels (07_trees/<PLOT>_07_merged_2cm_treeid_tiles):
+           07_trees/<PLOT>_07_segfix/<PLOT>_07_segfix.las   every labelled point, and the unlabelled points inside the plot box
                                                             plus --buffer m; all 2 cm fields, with a signed treeID
                                                             (> 0 tree, 0 unassigned, -1 noise) that segfix finds on its own
-           07_trees/<SITE>_07_segfix/segfix_project.json    the segfix project manifest
-           07_trees/<SITE>_07_segfix/tern_segfix.json       which merge tiles the points came from, in order
+           07_trees/<PLOT>_07_segfix/segfix_project.json    the segfix project manifest
+           07_trees/<PLOT>_07_segfix/pipeline_segfix.json       which merge tiles the points came from, in order
          and adds the project to segfix's recent list. Open it with `segfix` and work through the trees, starting with
-         those at the top of 07_trees/<SITE>_07_review.csv; Space marks a tree done, Ctrl+S saves (segfix writes only the
+         those at the top of 07_trees/<PLOT>_07_review.csv; Space marks a tree done, Ctrl+S saves (segfix writes only the
          labels, in place). The point order never changes, which is what lets the import split the file back into tiles.
 status   trees reviewed (segfix's Done list in <cloud>.segfix.json) and labels changed so far.
-import   reads the saved project back: 07_trees/<SITE>_07_trees_edited_tiles/*.laz (same tiles as the merge, treeid
-         int32) and <SITE>_07_segfix_import.json (trees added, removed and changed, points relabelled, noise). From then
-         on the review and stages 08-09 read the edited labels (tern.tree_tiles). Refused while trees are not marked
+import   reads the saved project back: 07_trees/<PLOT>_07_trees_edited_tiles/*.laz (same tiles as the merge, treeid
+         int32) and <PLOT>_07_segfix_import.json (trees added, removed and changed, points relabelled, noise). From then
+         on the review and stages 08-09 read the edited labels (project.tree_tiles). Refused while trees are not marked
          done, unless --allow-unfinished.
 Plots without manual trees have no transferred labels to start from; segment them first (e.g. `sylva trees --segment`
 on the height-normalised plot cloud) and import that file into segfix by hand.
@@ -24,8 +24,8 @@ on the height-normalised plot cloud) and import that file into segfix by hand.
 import copy, json, os, sys, time
 from pathlib import Path
 import numpy as np
-import tern
-from tern import ROOT, log
+import project
+from project import ROOT, log
 
 LABEL = "treeID"
 
@@ -58,7 +58,7 @@ def prepare(site, buffer=15.0, force=False):
     pd.mkdir(parents=True, exist_ok=True)
     for f in pd.iterdir():
         if f.is_file(): f.unlink()
-    x0, y0, x1, y1 = tern.plot_bounds(site); x0, y0, x1, y1 = x0 - buffer, y0 - buffer, x1 + buffer, y1 + buffer
+    x0, y0, x1, y1 = project.plot_bounds(site); x0, y0, x1, y1 = x0 - buffer, y0 - buffer, x1 + buffer, y1 + buffer
     t0 = time.time(); src = [laspy.open(t).header for t in tiles]
     lo = np.min([h.mins for h in src], axis=0); hdr = header_for(src[0], lo)
     std = [d for d in src[0].point_format.standard_dimension_names if d not in ("X", "Y", "Z")]
@@ -74,10 +74,10 @@ def prepare(site, buffer=15.0, force=False):
             rec.x, rec.y, rec.z = x[keep], y[keep], np.asarray(las.z)[keep]
             for d in std + extra: rec[d] = np.asarray(las[d])[keep]
             rec[LABEL] = lab[keep].astype(np.int32); w.write_points(rec); n_out += n; n_trees += int((lab[keep] > 0).sum())
-    tern.jsave({"source": str(ROOT / site / "07_trees" / f"{site}_07_merged_2cm_treeid_tiles"), "data_file": cloud_path(site).name,
+    project.jsave({"source": str(ROOT / site / "07_trees" / f"{site}_07_merged_2cm_treeid_tiles"), "data_file": cloud_path(site).name,
                 "created": time.strftime("%Y-%m-%dT%H:%M:%S")}, pd / "segfix_project.json")
-    tern.jsave({"site": site, "label_field": LABEL, "plot_box_buffer_m": buffer, "box": [x0, y0, x1, y1], "tiles": parts,
-                "points": n_out, "labelled_points": n_trees, "merged_points": n_all, "prepared": time.strftime("%Y-%m-%d %H:%M")}, pd / "tern_segfix.json")
+    project.jsave({"site": site, "label_field": LABEL, "plot_box_buffer_m": buffer, "box": [x0, y0, x1, y1], "tiles": parts,
+                "points": n_out, "labelled_points": n_trees, "merged_points": n_all, "prepared": time.strftime("%Y-%m-%d %H:%M")}, pd / "pipeline_segfix.json")
     register(pd)
     log(f"{site}: segfix project {pd.name}: {n_out:,} of {n_all:,} points ({n_trees:,} labelled), {cloud_path(site).stat().st_size / 1e9:.1f} GB ({time.time() - t0:.0f} s)")
 
@@ -89,7 +89,7 @@ def register(pd):
         r = json.load(open(reg)) if reg.exists() else {"entries": []}
         r["entries"] = [e for e in r["entries"] if e.get("path") != str(pd)]
         r["entries"].insert(0, {"path": str(pd), "type": "workspace", "last_opened": time.strftime("%Y-%m-%dT%H:%M:%S")})
-        reg.parent.mkdir(parents=True, exist_ok=True); tern.jsave(r, reg)
+        reg.parent.mkdir(parents=True, exist_ok=True); project.jsave(r, reg)
     except (OSError, ValueError) as e: log(f"could not add {pd} to segfix's recent list ({e}); open it with File > Open Project")
 
 
@@ -97,7 +97,7 @@ def read_labels(site):
     """treeID of the saved project (segfix edits it in place), and the transfer's labels for the same points."""
     import laspy
     with laspy.open(str(cloud_path(site))) as r: new = np.concatenate([np.asarray(c[LABEL]) for c in r.chunk_iterator(20_000_000)]).astype(np.int64)
-    meta = json.load(open(project_dir(site) / "tern_segfix.json")); x0, y0, x1, y1 = meta["box"]; old = []
+    meta = json.load(open(project_dir(site) / "pipeline_segfix.json")); x0, y0, x1, y1 = meta["box"]; old = []
     for p in meta["tiles"]:
         if not p["points"]: continue
         las = laspy.read(str(ROOT / site / "07_trees" / f"{site}_07_merged_2cm_treeid_tiles" / p["tile"]))
@@ -134,7 +134,7 @@ def import_(site, allow_unfinished=False):
     old, new, meta = read_labels(site); s = compare(old, new, done_trees(site))
     if s["trees_not_done"] and not allow_unfinished:
         raise RuntimeError(f"{site}: {len(s['trees_not_done'])} trees not marked done in segfix (first: {s['trees_not_done'][:10]}); finish them or pass --allow-unfinished")
-    out = tern.edited_tiles_dir(site); tmp = out.with_name(out.name + ".part")
+    out = project.edited_tiles_dir(site); tmp = out.with_name(out.name + ".part")
     if tmp.exists():
         for f in tmp.iterdir(): f.unlink()
     tmp.mkdir(exist_ok=True)
@@ -151,8 +151,8 @@ def import_(site, allow_unfinished=False):
         out.rmdir()
     os.replace(tmp, out)
     rec = {"site": site, "project": str(project_dir(site)), "imported": time.strftime("%Y-%m-%d %H:%M"), "tiles": str(out.name), **s}
-    tern.jsave(rec, ROOT / site / "07_trees" / f"{site}_07_segfix_import.json")
-    tern.record_run(site, "07_segfix_import", trees=s["trees_after"], relabelled=s["points_relabelled"], not_done=len(s["trees_not_done"]))
+    project.jsave(rec, ROOT / site / "07_trees" / f"{site}_07_segfix_import.json")
+    project.record_run(site, "07_segfix_import", trees=s["trees_after"], relabelled=s["points_relabelled"], not_done=len(s["trees_not_done"]))
     log(f"{site}: imported {s['trees_after']} trees ({s['trees_done']} done) into {out.name}; {s['points_relabelled']:,} points relabelled")
 
 
@@ -163,11 +163,11 @@ def done(site):
 
 
 if __name__ == "__main__":
-    p = tern.parser(__doc__, sites=False); p.add_argument("action", choices=["prepare", "status", "import"])
-    p.add_argument("sites", nargs="*", metavar="SITE"); p.add_argument("--buffer", type=float, default=15.0)
+    p = project.parser(__doc__, sites=False); p.add_argument("action", choices=["prepare", "status", "import"])
+    p.add_argument("sites", nargs="*", metavar="PLOT"); p.add_argument("--buffer", type=float, default=15.0)
     p.add_argument("--force", action="store_true"); p.add_argument("--allow-unfinished", action="store_true"); a = p.parse_args()
-    sites = a.sites or [s for s in tern.SITES if tern.setting(s, "trees")]
-    if a.action == "prepare": ok = tern.for_sites(prepare, sites, "07_segfix", buffer=a.buffer, force=a.force)
-    elif a.action == "status": ok = tern.for_sites(status, sites, "07_segfix")
-    else: ok = tern.for_sites(import_, sites, "07_segfix", allow_unfinished=a.allow_unfinished)
+    sites = a.sites or [s for s in project.plots() if project.has_trees(s)]
+    if a.action == "prepare": ok = project.for_sites(prepare, sites, "07_segfix", buffer=a.buffer, force=a.force)
+    elif a.action == "status": ok = project.for_sites(status, sites, "07_segfix")
+    else: ok = project.for_sites(import_, sites, "07_segfix", allow_unfinished=a.allow_unfinished)
     sys.exit(0 if ok else 1)

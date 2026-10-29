@@ -1,17 +1,17 @@
 """Stages 08 (QSM) and 09 (leaf/wood) for the manual trees: a raycloudtools QSM and a sylva QSM per tree, and a sylva
 leaf/wood split with leaf angles and leaf area.
 
-usage: s08_tree_models.py [SITE ...] [--workers=6] [--only=12,34] [--no-rct] [--no-sylva] [--limit=N] [--meshes-only]
+usage: s08_tree_models.py [PLOT ...] [--workers=6] [--only=12,34] [--no-rct] [--no-sylva] [--limit=N] [--meshes-only]
 
-Trees come from tern.tree_tiles (the segfix-edited labels once imported, else the transfer); each point's ray starts at
+Trees come from project.tree_tiles (the segfix-edited labels once imported, else the transfer); each point's ray starts at
 the scanner it came from (point_source_id -> scan position in the merge's matrices).
-  08_qsm/<SITE>_08_rct/<SITE>_08_tree_<id>_trees.txt      raycloudtools `rayextract trees` on the tree's ray cloud with
+  08_qsm/<PLOT>_08_rct/<PLOT>_08_tree_<id>_trees.txt      raycloudtools `rayextract trees` on the tree's ray cloud with
                                                            the plot ground mesh (from the 1 m DTM); + _trees_mesh.ply
-  08_qsm/<SITE>_08_sylva/<SITE>_08_tree_<id>_qsm.csv      sylva.qsm.build_qsm on the tree's wood points (1 cm thinned),
+  08_qsm/<PLOT>_08_sylva/<PLOT>_08_tree_<id>_qsm.csv      sylva.qsm.build_qsm on the tree's wood points (1 cm thinned),
                                                            breast-height radius prior from 06_stems or the tree's own slab
-  09_leafwood/<SITE>_09_tree_<id>.laz                      the tree's points with wood (1/0), height above the DTM, treeid
-  <SITE>_08_rct_trees.csv, <SITE>_08_sylva_trees.csv, 09_leafwood/<SITE>_09_leafwood.csv, 08_qsm/<SITE>_08_models_manifest.json
-  08_qsm/<SITE>_08_plot_rct_mesh.ply, _plot_sylva_mesh.ply, _plot_ground_mesh.ply   all trees of each tool, a tree the same colour in both
+  09_leafwood/<PLOT>_09_tree_<id>.laz                      the tree's points with wood (1/0), height above the DTM, treeid
+  <PLOT>_08_rct_trees.csv, <PLOT>_08_sylva_trees.csv, 09_leafwood/<PLOT>_09_leafwood.csv, 08_qsm/<PLOT>_08_models_manifest.json
+  08_qsm/<PLOT>_08_plot_rct_mesh.ply, _plot_sylva_mesh.ply, _plot_ground_mesh.ply   all trees of each tool, a tree the same colour in both
 Resumable: a tree is redone only when its points changed (count and coordinate checksum) or a step is missing; trees
 removed in segfix lose their outputs. Leaf/wood: sylva.leaves.classify_leaf_wood (graph-based, Tian & Li 2022).
 """
@@ -19,11 +19,11 @@ import colorsys, csv, json, re, subprocess, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
-import tern
-from tern import ROOT, log
+import project
+from project import ROOT, log
 
 PLY_DT = np.dtype([("x", "f8"), ("y", "f8"), ("z", "f8"), ("t", "f8"), ("nx", "f4"), ("ny", "f4"), ("nz", "f4"), ("r", "u1"), ("g", "u1"), ("b", "u1"), ("a", "u1")])
-PLY_HDR = ("ply\nformat binary_little_endian 1.0\ncomment TERN TLS manual tree, ray starts at the scanner of each point\nelement vertex {n}\n"
+PLY_HDR = ("ply\nformat binary_little_endian 1.0\ncomment manual tree, ray starts at the scanner of each point\nelement vertex {n}\n"
            "property double x\nproperty double y\nproperty double z\nproperty double time\nproperty float nx\nproperty float ny\nproperty float nz\n"
            "property uchar red\nproperty uchar green\nproperty uchar blue\nproperty uchar alpha\nend_header\n")
 
@@ -48,7 +48,7 @@ def collect_trees(site, only=None):
     """{tree id: (xyz float32, scan index)} of every labelled point."""
     from sylva import io
     xs, ids, ps = [], [], []
-    for t in tern.tree_tiles(site):
+    for t in project.tree_tiles(site):
         c = io.read(t); lab = c.attrs["treeid"].astype(np.int64); m = lab > 0
         if only: m &= np.isin(lab, list(only))
         if m.any(): xs.append(c.xyz[m].astype(np.float32)); ids.append(lab[m]); ps.append(c.attrs["point_source_id"][m].astype(np.int32))
@@ -108,7 +108,7 @@ def one_tree(args):
             a["nx"], a["ny"], a["nz"] = (origins[psid] - xyz).T.astype(np.float32); a["r"], a["g"], a["b"], a["a"] = 200, 120, 40, 255
             with open(ply, "wb") as f: f.write(PLY_HDR.format(n=len(a)).encode()); f.write(a.tobytes())
             # plain mode: --segmented inflates the trunk of multi-stem clumps; no --max_diameter (below rct's 0.9 it runs 50-300x slower)
-            r = subprocess.run(["apptainer", "exec", tern.RCT_SIF, "rayextract", "trees", ply.name, "ground_mesh.ply"], cwd=rct_dir, capture_output=True, text=True, timeout=3600)
+            r = subprocess.run(["apptainer", "exec", project.RCT_SIF, "rayextract", "trees", ply.name, "ground_mesh.ply"], cwd=rct_dir, capture_output=True, text=True, timeout=3600)
             if not txt.exists(): raise RuntimeError("rayextract trees wrote no tree file: " + (r.stdout + r.stderr).strip().splitlines()[-1][:200])
             ply.unlink(); (rct_dir / f"{site}_08_tree_{tid}_segmented.ply").unlink(missing_ok=True)
             s = parse_rct_trees(txt); res.update(s or {"rct_segments": 0}); res["rct_mode"] = "plain"; res["rct_seconds"] = round(time.time() - t0, 1)
@@ -140,7 +140,7 @@ def one_tree(args):
 
 def scan_origins(site):
     """Scanner position per point_source_id, from the merge's matrices."""
-    M, src = tern.matrices(site); j = json.load(open(ROOT / site / "03_registration" / f"{site}_03_transforms.json"))
+    M, src = project.matrices(site); j = json.load(open(ROOT / site / "03_registration" / f"{site}_03_transforms.json"))
     origins = np.zeros((max(x["index"] for x in j["scans"]) + 1, 3)); seen = set()
     for x in j["scans"]:
         n = x["name"] if x["name"] in M else x["name"].split("#")[0]
@@ -154,16 +154,16 @@ def remove_tree(site, tid):
 
 
 def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
-    if not tern.setting(site, "trees") and not tern.edited_tiles_dir(site).exists(): log(f"{site}: no trees"); return
-    t0 = time.time(); q = tern.stage(site, "08_qsm"); lw = tern.stage(site, "09_leafwood")
+    if not project.has_trees(site) and not project.edited_tiles_dir(site).exists(): log(f"{site}: no trees"); return
+    t0 = time.time(); q = project.stage(site, "08_qsm"); lw = project.stage(site, "09_leafwood")
     rct_dir, syl_dir = q / f"{site}_08_rct", q / f"{site}_08_sylva"; rct_dir.mkdir(exist_ok=True); syl_dir.mkdir(exist_ok=True)
-    origins, src = scan_origins(site); dtm = tern.load_dtm(site); dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution}
+    origins, src = scan_origins(site); dtm = project.load_dtm(site); dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution}
     nv, nf = write_ground_mesh(dtm, rct_dir / "ground_mesh.ply")
-    trees = collect_trees(site, only); labels = "segfix edit" if tern.edited_tiles_dir(site).exists() else "transfer"
+    trees = collect_trees(site, only); labels = "segfix edit" if project.edited_tiles_dir(site).exists() else "transfer"
     rows_ = list(csv.DictReader(open(ROOT / site / "06_stems" / f"{site}_06_stems.csv")))
     stems = np.array([[float(r["x"]), float(r["y"]), float(r["dbh"])] for r in rows_]) if rows_ else None
     mf = q / f"{site}_08_models_manifest.json"
-    man = tern.jload(mf) or {"site": site, "trees": {}}; man.update(matrices=src, labels=labels, ground_mesh=f"{nv} vertices, {nf} faces from the 1 m DTM")
+    man = project.jload(mf) or {"site": site, "trees": {}}; man.update(matrices=src, labels=labels, ground_mesh=f"{nv} vertices, {nf} faces from the 1 m DTM")
     if not only:                                                         # trees removed in segfix
         for t in [t for t in man["trees"] if int(t) not in trees]: remove_tree(site, t); del man["trees"][t]
     def same(t):
@@ -179,7 +179,7 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
             if old.get("signature", r["signature"]) == r["signature"] or str(old.get("n_points")) == r["signature"].split(":")[0]:
                 for key, v in old.items():                              # keep the results of a step that was not redone
                     if key not in r and ((key.startswith("rct_") and "rct_mode" not in r) or (not key.startswith("rct_") and "leafwood_seconds" not in r)): r[key] = v
-            man["trees"][str(r["treeid"])] = r; tern.jsave(man, mf)
+            man["trees"][str(r["treeid"])] = r; project.jsave(man, mf)
             if "error" in r: log(f"{site}: tree {r['treeid']}: ERROR {r['error'][:150]}")
             elif k % 20 == 0 or k == len(jobs): log(f"{site}: {k}/{len(jobs)} trees ({(time.time() - t0) / 60:.0f} min)")
     rows = [man["trees"][k] for k in sorted(man["trees"], key=int)]
@@ -195,7 +195,7 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
     man["totals"] = {"trees": len(rows), "ok": len(ok), "errors": len(rows) - len(ok), "rct_volume_m3": round(sum(r.get("rct_volume_m3") or 0 for r in ok), 3),
                      "sylva_volume_m3": round(sum(r.get("sylva_total_volume_m3") or 0 for r in ok), 3), "leaf_area_m2": round(sum(r.get("leaf_area_m2") or 0 for r in ok), 1),
                      "seconds": round(time.time() - t0)}
-    tern.jsave(man, mf); plot_meshes(site); tern.record_run(site, "08_tree_models", labels=labels, **man["totals"]); log(f"{site}: {man['totals']}")
+    project.jsave(man, mf); plot_meshes(site); project.record_run(site, "08_tree_models", labels=labels, **man["totals"]); log(f"{site}: {man['totals']}")
 
 
 def read_ply_mesh(path):
@@ -248,15 +248,15 @@ def plot_meshes(site):
 
 
 def done(site):
-    m = tern.jload(ROOT / site / "08_qsm" / f"{site}_08_models_manifest.json")
-    if not tern.setting(site, "trees"): return True
+    m = project.jload(ROOT / site / "08_qsm" / f"{site}_08_models_manifest.json")
+    if not project.has_trees(site): return True
     if not m or "totals" not in m: return False
     j = ROOT / site / "07_trees" / f"{site}_07_segfix_import.json"               # an import newer than the models means redo
     return not j.exists() or Path(ROOT / site / "08_qsm" / f"{site}_08_models_manifest.json").stat().st_mtime >= j.stat().st_mtime
 
 
 if __name__ == "__main__":
-    p = tern.parser(__doc__); p.add_argument("--workers", type=int, default=6); p.add_argument("--only", default=""); p.add_argument("--limit", type=int, default=None)
+    p = project.parser(__doc__); p.add_argument("--workers", type=int, default=6); p.add_argument("--only", default=""); p.add_argument("--limit", type=int, default=None)
     p.add_argument("--no-rct", action="store_true"); p.add_argument("--no-sylva", action="store_true"); p.add_argument("--meshes-only", action="store_true"); a = p.parse_args()
-    if a.meshes_only: tern.for_sites(plot_meshes, a.sites, "08")
-    else: tern.for_sites(run, a.sites, "08", workers=a.workers, only={int(v) for v in a.only.split(",") if v}, do_rct=not a.no_rct, do_sylva=not a.no_sylva, limit=a.limit)
+    if a.meshes_only: project.for_sites(plot_meshes, a.sites, "08")
+    else: project.for_sites(run, a.sites, "08", workers=a.workers, only={int(v) for v in a.only.split(",") if v}, do_rct=not a.no_rct, do_sylva=not a.no_sylva, limit=a.limit)

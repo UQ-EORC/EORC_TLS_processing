@@ -1,26 +1,26 @@
 """Stages 05 (ground, DTM, CHM) and 06 (automatic stems), with QC figures (90) and a processing record (99).
 
-usage: s05_ground.py [SITE ...]
+usage: s05_ground.py [PLOT ...]
 
 The 2 cm merge (04) is thinned to 5 cm (8 cm above 260 M points). Ground: the lowest points of each 2 m cell (within
 -0.3..+0.4 m of the cell's 1st percentile, 10 cm thinned) through sylva.ground.classify_ground_pmf (2 m cells, 40 m
 window); TIN DTM at 1 m with a support raster (plan distance to the nearest ground point); height above the DTM; CHM
 at 0.5 m. Stems: sylva.trees.detect_stems on the 0.5-3 m slab, with per-scan stem noise (sylva.quality.stem_noise).
 The automatic stems over-count and inflate DBH; plot basal area and density come from the manual trees (s99_plot.py).
-  05_ground/<SITE>_05_dtm_1m.tif, _dtm_support_1m.tif, _chm_0.5m.tif
-  06_stems/<SITE>_06_stems.csv
-  90_qc/<SITE>_90_qc_ground_dtm_chm.png, _ground_transect.png, _stems_slab.png, _qc_stem_noise.json
-  99_meta/<SITE>_99_processing.json        counts, checks and flags (status PASS or CHECK)
+  05_ground/<PLOT>_05_dtm_1m.tif, _dtm_support_1m.tif, _chm_0.5m.tif
+  06_stems/<PLOT>_06_stems.csv
+  90_qc/<PLOT>_90_qc_ground_dtm_chm.png, _ground_transect.png, _stems_slab.png, _qc_stem_noise.json
+  99_meta/<PLOT>_99_processing.json        counts, checks and flags (status PASS or CHECK)
 """
 import csv, json, time
 import numpy as np
-import tern
-from tern import ROOT, log
+import project
+from project import ROOT, log
 
 
 def thinned_merge(site, voxel):
     from sylva import io, filters, PointCloud
-    tiles = tern.merged_tiles(site); parts = []
+    tiles = project.merged_tiles(site); parts = []
     for t in tiles:
         c = io.read(t)
         parts.append(filters.voxel_downsample(PointCloud(c.xyz, {"scan_id": c.attrs["point_source_id"].astype(np.int32)}), voxel, origin=(0.0, 0.0, 0.0)))
@@ -41,11 +41,11 @@ def lowest_points(cloud, cell=2.0):
 def run(site):
     import sylva
     from sylva import filters, ground, quality, trees
-    t0 = time.time(); g4, s5, qc, meta = (tern.stage(site, d) for d in ("05_ground", "06_stems", "90_qc", "99_meta"))
+    t0 = time.time(); g4, s5, qc, meta = (project.stage(site, d) for d in ("05_ground", "06_stems", "90_qc", "99_meta"))
     merge = json.load(open(ROOT / site / "04_registered" / f"{site}_04_merge.json"))
     voxel = 0.05 if merge["points_merged"] < 260_000_000 else 0.08
     cloud, n_tiles = thinned_merge(site, voxel)
-    rec = {"site": site, "tern_site_code": tern.setting(site, "code"), "sylva_version": sylva.__version__, "run": time.strftime("%Y-%m-%d") + ", s05_ground.py",
+    rec = {"site": site, "site_code": project.setting(site, "code"), "sylva_version": sylva.__version__, "run": time.strftime("%Y-%m-%d") + ", s05_ground.py",
            "source": f"04_registered/{site}_04_merged_2cm_tiles ({n_tiles} tiles, {merge['points_merged']:,} points), thinned to {voxel * 100:g} cm",
            "matrices": merge.get("matrices"), "scans_used": len(merge["scans_used"]), "frame": "project coordinates", "points_used": len(cloud), "voxel_m": voxel}
     log(f"{site}: {len(cloud):,} points at {voxel * 100:g} cm from {n_tiles} tiles")
@@ -79,8 +79,8 @@ def run(site):
     if rec["dtm_cells_with_ground_within_3m_pct"] < 20: flags.append("little observed ground")
     if not stems: flags.append("no stems detected")
     rec["flags"] = flags or ["none"]; rec["status"] = "CHECK" if flags else "PASS (automatic checks only; look at the 90_qc figures)"
-    rec["seconds"] = round(time.time() - t0); tern.jsave(rec, meta / f"{site}_99_processing.json")
-    tern.record_run(site, "05_ground", status=rec["status"], stems=len(stems)); log(f"{site}: {rec['status']} ({rec['seconds']} s)")
+    rec["seconds"] = round(time.time() - t0); project.jsave(rec, meta / f"{site}_99_processing.json")
+    project.record_run(site, "05_ground", status=rec["status"], stems=len(stems)); log(f"{site}: {rec['status']} ({rec['seconds']} s)")
 
 
 def make_figs(site, cloud, dtm, sup, chm, stems, qc):
@@ -120,5 +120,5 @@ def done(site): return (ROOT / site / "99_meta" / f"{site}_99_processing.json").
 
 
 if __name__ == "__main__":
-    a = tern.parser(__doc__).parse_args()
-    tern.for_sites(run, a.sites, "05")
+    a = project.parser(__doc__).parse_args()
+    project.for_sites(run, a.sites, "05")

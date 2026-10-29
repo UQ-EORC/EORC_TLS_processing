@@ -1,26 +1,26 @@
 """Stage 01: one filtered LAZ per scan from the RiSCAN PRO LAZ exports (scanner coordinates).
 
-usage: s01_convert.py [SITE ...] [--workers=4] [--only=ScanPos001,...]
+usage: s01_convert.py [PLOT ...] [--workers=4] [--only=ScanPos001,...]
 
-Input: RiSCAN_OUTPUTS/<SITE>/*.laz (one per scan, unfiltered) and its POINT_FILTERS.txt, or
-01_scans/<SITE>_01_filter_override.txt where a plot deliberately departs from it (Tumbarumba: -30 dB). Filter keys:
+Input: <exports>/<PLOT>/*.laz (one RiSCAN PRO export per scan, scanner coordinates) and the point filter: the plot's
+"filter" file in project.toml if set, else <exports>/<PLOT>/POINT_FILTERS.txt. Filter keys:
   range lo hi            scanner range (the exports are in SOCS, so range = |xyz|)
   reflectance lo hi      dB (the export stores it x100 as int16)
   deviation lo hi        RIEGL pulse-shape deviation
   amplitude lo hi        dB, x100 in the export
   omit p1 p2 ...         scan positions left out
-Output: 01_scans/<SITE>_01_<scan>.laz with reflectance, amplitude, deviation, range, return_number and
+Output: 01_scans/<PLOT>_01_<scan>.laz with reflectance, amplitude, deviation, range, return_number and
 number_of_returns (recounted after filtering; a pulse = the points sharing a gps_time), echo_type (RIEGL type before
 filtering: 0 single, 1 first, 2 interior, 3 last), gps_time, point_source_id (the position's index); plus
-<SITE>_01_filter.txt and <SITE>_01_manifest.json. Resumable: a scan whose LAZ exists for the same export file is skipped.
+<PLOT>_01_filter.txt and <PLOT>_01_manifest.json. Resumable: a scan whose LAZ exists for the same export file is skipped.
 A position with two export files gives ScanPosNNN and ScanPosNNN#2.
 """
 import json, os, re, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
-import tern
-from tern import EXPORTS, log
+import project
+from project import EXPORTS, log
 
 NAME = re.compile(r"^(ScanPos\d+|tilt ?\d+)", re.I)
 
@@ -44,8 +44,7 @@ def scan_name(path):
 
 
 def filter_file(site):
-    o = tern.ROOT / site / "01_scans" / f"{site}_01_filter_override.txt"
-    return o if o.exists() else EXPORTS / site / "POINT_FILTERS.txt"
+    return project.setting_path(site, "filter") or EXPORTS / site / "POINT_FILTERS.txt"
 
 
 def jobs_for(site, only=None):
@@ -67,7 +66,7 @@ def jobs_for(site, only=None):
 def convert_one(args):
     site, name, src, st, index = args
     from sylva import io, PointCloud
-    laz = tern.scan_laz(site, name); tmp = laz.with_name(laz.stem + ".part.laz")
+    laz = project.scan_laz(site, name); tmp = laz.with_name(laz.stem + ".part.laz")
     try:
         t0 = time.time()
         c = io.read(src); n_in = len(c); xyz = c.xyz; a = c.attrs
@@ -101,37 +100,37 @@ def convert_one(args):
 
 
 def run(site, workers=4, only=None):
-    out = tern.stage(site, "01_scans")
+    out = project.stage(site, "01_scans")
     st, jobs, skipped = jobs_for(site, only); ff = filter_file(site)
     (out / f"{site}_01_filter.txt").write_text(f"# applied to every scan of {site} by s01_convert.py; source: {EXPORTS / site} (scanner coordinates)\n"
                                                f"# from {ff}\n" + ff.read_text().strip() + "\n" + (f"# positions omitted: {sorted(skipped)}\n" if skipped else ""))
     mf = out / f"{site}_01_manifest.json"
-    man = tern.jload(mf) or {"site": site, "source": f"RiSCAN PRO LAZ export, {EXPORTS / site}", "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
+    man = project.jload(mf) or {"site": site, "source": f"RiSCAN PRO LAZ export, {EXPORTS / site}", "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
                              "filters": {k: (sorted(v) if isinstance(v, set) else list(v)) for k, v in st.items()}, "filter_file": str(ff),
                              "omitted_positions": sorted(skipped), "scans": {}}
     todo = [j for j in jobs if not ("error" not in man["scans"].get(j[1], {"error": 1}) and man["scans"][j[1]].get("file") == Path(j[2]).name
-                                    and tern.scan_laz(site, j[1]).exists())]
+                                    and project.scan_laz(site, j[1]).exists())]
     log(f"{site}: {len(todo)} of {len(jobs)} scans to convert ({len(skipped)} positions omitted)")
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, (name, res) in enumerate(pool.map(convert_one, todo), 1):
-            man["scans"][name] = res; tern.jsave(man, mf)
+            man["scans"][name] = res; project.jsave(man, mf)
             if "error" in res: log(f"{site}: {name}: ERROR {res['error'][:160]}")
             elif k % 10 == 0 or k == len(todo):
                 log(f"{site}: {k}/{len(todo)} {name}: {res['written']:,} of {res['points']:,} kept, {(time.time() - t0) / 60:.0f} min")
     ok = [v for v in man["scans"].values() if "error" not in v]
     man["totals"] = {"scans": len(ok), "points_in": sum(v["points"] for v in ok), "points_written": sum(v["written"] for v in ok),
                      "gb": round(sum(v["laz_mb"] for v in ok) / 1000, 1), "errors": sum("error" in v for v in man["scans"].values())}
-    tern.jsave(man, mf); tern.record_run(site, "01_convert", **man["totals"])
+    project.jsave(man, mf); project.record_run(site, "01_convert", **man["totals"])
     if man["totals"]["errors"]: raise RuntimeError(f"{site}: {man['totals']['errors']} scans failed; see {mf.name}")
 
 
 def done(site):
-    m = tern.jload(tern.ROOT / site / "01_scans" / f"{site}_01_manifest.json") or {}; t = m.get("totals")
+    m = project.jload(project.ROOT / site / "01_scans" / f"{site}_01_manifest.json") or {}; t = m.get("totals")
     return bool(t) and t.get("errors", 1) == 0 and t["scans"] == len(m["scans"])
 
 
 if __name__ == "__main__":
-    p = tern.parser(__doc__); p.add_argument("--workers", type=int, default=4); p.add_argument("--only", default="")
+    p = project.parser(__doc__); p.add_argument("--workers", type=int, default=4); p.add_argument("--only", default="")
     a = p.parse_args()
-    tern.for_sites(run, a.sites, "01", workers=a.workers, only=set(a.only.split(",")) - {""})
+    project.for_sites(run, a.sites, "01", workers=a.workers, only=set(a.only.split(",")) - {""})

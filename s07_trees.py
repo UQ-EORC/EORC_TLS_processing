@@ -1,35 +1,34 @@
-"""Stage 07: the manually segmented trees (TERN_TREES) carried onto the 2 cm merge, and a review list for editing.
+"""Stage 07: manually segmented trees carried onto the 2 cm merge, and a review list for editing.
 
-usage: s07_trees.py [SITE ...] [--review-only] [--r-label=0.05] [--r-grow=0.04] [--r-near=0.15] [--grow-passes=2] [--no-clusters]
+usage: s07_trees.py [PLOT ...] [--review-only] [--r-label=0.05] [--r-grow=0.04] [--r-near=0.15] [--grow-passes=2] [--no-clusters]
 
-Transfer. The trees (TERN_TREES/<SITE>/final_trees_new_frame, one PLY per tree, listed in metadata/<SITE>_final_trees_new_frame.csv)
-are in the frame of the TERN processing's matrices (03_transforms_dat_rxp_run). Where the merge uses other matrices
-(Litchfield: the coreg set), each tree is moved by the rigid block motion under which it fits the merged cloud best.
+Transfer. The trees are one point cloud per tree (project.manual_tree_files: manual_trees, optionally listed in
+manual_trees_table), in the frame of the matrices in manual_trees_frame (default: the merge's own). Where the merge uses
+other matrices (e.g. a coreg set), each tree is moved by the rigid block motion under which it fits the merged cloud best.
 Then, tile by tile, a merged point takes the id of the nearest tree point within r_label; for a few passes an unlabelled
 point within r_grow of a labelled one and within r_near of any tree point takes that label; and small clusters of
 unlabelled canopy that sit inside one tree's crown are joined to it (attach_clusters).
-  07_trees/<SITE>_07_merged_2cm_treeid_tiles/, <SITE>_07_merged_2cm_treeid.laz   treeid per point (0 = no tree)
-  07_trees/<SITE>_07_trees.csv, <SITE>_07_transfer.json                         per-tree counts and fit
+  07_trees/<PLOT>_07_merged_2cm_treeid_tiles/, <PLOT>_07_merged_2cm_treeid.laz   treeid per point (0 = no tree)
+  07_trees/<PLOT>_07_trees.csv, <PLOT>_07_transfer.json                         per-tree counts and fit
 Review. For each tree, the unlabelled points more than 1 m above the local floor inside its crown envelope (plan hull of
-its points above 30 % of its height), from the current labels (tern.tree_tiles: the segfix edit once imported):
-  07_trees/<SITE>_07_review.csv (most affected first), <SITE>_07_review_top3.png
+its points above 30 % of its height), from the current labels (project.tree_tiles: the segfix edit once imported):
+  07_trees/<PLOT>_07_review.csv (most affected first), <PLOT>_07_review_top3.png
 The review list says where to start in segfix (s07_segfix.py).
 """
 import csv, json, time
 from pathlib import Path
 import numpy as np
-import tern
-from tern import ROOT, TREES, log
+import project
+from project import ROOT, log
 
 BINS = np.arange(0, 0.1005, 0.005)                      # fit histogram, 5 mm steps to 10 cm (+ overflow)
 
 
 def load_trees(site):
     from sylva import io
-    rows = list(csv.DictReader(open(TREES / site / "metadata" / f"{site}_final_trees_new_frame.csv")))
     xyz, ids, bounds = [], [], {}
-    for r in rows:
-        c = io.read(str(TREES / site / "final_trees_new_frame" / r["file"])); tid = int(r["treeid"])
+    for tid, f in project.manual_tree_files(site):
+        c = io.read(str(f))
         xyz.append(c.xyz.astype(np.float32)); ids.append(np.full(len(c), tid, np.int32)); bounds[tid] = (c.xyz.min(axis=0), c.xyz.max(axis=0))
     return np.concatenate(xyz), np.concatenate(ids), bounds
 
@@ -38,7 +37,7 @@ class Tiles:
     """The merged cloud's tiles, read on demand (xyz as float32), with their bounds."""
     def __init__(self, site):
         from sylva.als import catalogue
-        self.cat = catalogue.catalog(tern.merged_tiles(site)); self.cache = {}
+        self.cat = catalogue.catalog(project.merged_tiles(site)); self.cache = {}
 
     def points_in(self, lo, hi):
         from sylva import io
@@ -51,14 +50,9 @@ class Tiles:
         return np.concatenate(parts) if parts else np.zeros((0, 3), np.float32)
 
 
-def merge_dir(site):
-    reg = ROOT / site / "03_registration"; d = reg / f"{site}_03_coreg_dat"
-    return d if d.exists() else reg / f"{site}_03_transforms_dat"
-
-
 def needs_reframe(site):
     """True when the merge's matrices differ from the trees' for any scan (more than 1e-5)."""
-    a, b = tern.trees_frame_dir(site), merge_dir(site)
+    a, b = project.trees_frame_dir(site), project.matrices_dir(site)
     if a == b: return False
     old = {f.stem: np.loadtxt(f) for f in a.glob("*.DAT")}; new = {f.stem: np.loadtxt(f) for f in b.glob("*.DAT")}
     return any(not np.allclose(old[n], new[n], atol=1e-5) for n in old if n in new)
@@ -69,7 +63,7 @@ def reframe_trees(site, xyz, ids, bounds, tiles):
     its points fits the merged cloud best (median nearest-point distance). Choosing by the nearest scanner failed for
     trees near block boundaries."""
     from sylva import filters
-    new = {f.stem: np.loadtxt(f) for f in merge_dir(site).glob("*.DAT")}; old = {f.stem: np.loadtxt(f) for f in tern.trees_frame_dir(site).glob("*.DAT")}
+    new = {f.stem: np.loadtxt(f) for f in project.matrices_dir(site).glob("*.DAT")}; old = {f.stem: np.loadtxt(f) for f in project.trees_frame_dir(site).glob("*.DAT")}
     F = {n: new[n] @ np.linalg.inv(old[n]) for n in sorted(new) if n in old}
     blocks = []
     for n, m in F.items():
@@ -151,7 +145,7 @@ def ground_height(P, cell=1.0):
 
 def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, clusters=True):
     from sylva import io, filters
-    t0 = time.time(); out = tern.stage(site, "07_trees")
+    t0 = time.time(); out = project.stage(site, "07_trees")
     txyz, tids, bounds = load_trees(site); tiles = Tiles(site); reframe = None
     log(f"{site}: {len(bounds)} trees, {len(txyz):,} tree points")
     if needs_reframe(site):
@@ -198,9 +192,9 @@ def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, cluste
                "median_fit_cm": float(np.median(fits)) if fits else None,
                "tree_points_within_5cm": float(sum(h[:10].sum() for h in hist.values()) / max(sum(h.sum() for h in hist.values()), 1)),
                "settings": {"r_label": r_label, "r_grow": r_grow, "r_near": r_near, "grow_passes": grow_passes, "clusters": clusters, **{"cluster_" + k: v for k, v in CLUSTER.items()}},
-               "frame": f"{merge_dir(site).name}" + (f"; each tree moved from {tern.trees_frame_dir(site).name} by its best-fitting block motion" if reframe else ""),
-               "source": str(TREES / site / "final_trees_new_frame"), "seconds": round(time.time() - t0)}
-    tern.jsave(summary, out / f"{site}_07_transfer.json"); tern.record_run(site, "07_transfer", labelled=summary["labelled_points"], trees=len(bounds))
+               "frame": f"{project.matrices_dir(site).name}" + (f"; each tree moved from {project.trees_frame_dir(site).name} by its best-fitting block motion" if reframe else ""),
+               "source": str(project.setting_path(site, "manual_trees")), "seconds": round(time.time() - t0)}
+    project.jsave(summary, out / f"{site}_07_transfer.json"); project.record_run(site, "07_transfer", labelled=summary["labelled_points"], trees=len(bounds))
     log(f"{site}: {summary['labelled_points']:,} of {n_total:,} points labelled ({n_grown:,} grown, {n_clustered:,} as clusters); median fit {summary['median_fit_cm']:.1f} cm")
 
 
@@ -210,7 +204,7 @@ def review(site):
     from scipy.spatial import ConvexHull
     from sylva import io
     from sylva.als import catalogue
-    d = tern.stage(site, "07_trees"); tiles = sorted(catalogue.catalog(tern.tree_tiles(site)).tiles, key=lambda t: t.path)
+    d = project.stage(site, "07_trees"); tiles = sorted(catalogue.catalog(project.tree_tiles(site)).tiles, key=lambda t: t.path)
     pts = {}                                           # pass 1: each tree's points, thinned to 10 cm
     for t in tiles:
         c = io.read(str(t.path)); lab = c.attrs["treeid"].astype(np.int64); m = lab > 0
@@ -254,18 +248,18 @@ def review(site):
 
 
 def run(site, review_only=False, **kw):
-    if not tern.setting(site, "trees"): log(f"{site}: no manual trees; nothing to transfer"); return
+    if not project.has_trees(site): log(f"{site}: no manual trees; nothing to transfer"); return
     if not review_only: transfer(site, **kw)
     review(site)
 
 
 def done(site):
-    return not tern.setting(site, "trees") or ((ROOT / site / "07_trees" / f"{site}_07_transfer.json").exists() and (ROOT / site / "07_trees" / f"{site}_07_review.csv").exists())
+    return not project.has_trees(site) or ((ROOT / site / "07_trees" / f"{site}_07_transfer.json").exists() and (ROOT / site / "07_trees" / f"{site}_07_review.csv").exists())
 
 
 if __name__ == "__main__":
-    p = tern.parser(__doc__); p.add_argument("--review-only", action="store_true"); p.add_argument("--no-clusters", action="store_true")
+    p = project.parser(__doc__); p.add_argument("--review-only", action="store_true"); p.add_argument("--no-clusters", action="store_true")
     for k, v in (("r-label", 0.05), ("r-grow", 0.04), ("r-near", 0.15)): p.add_argument(f"--{k}", type=float, default=v)
     p.add_argument("--grow-passes", type=int, default=2); a = p.parse_args()
-    tern.for_sites(run, a.sites, "07", review_only=a.review_only, r_label=a.r_label, r_grow=a.r_grow, r_near=a.r_near,
+    project.for_sites(run, a.sites, "07", review_only=a.review_only, r_label=a.r_label, r_grow=a.r_grow, r_near=a.r_near,
                    grow_passes=a.grow_passes, clusters=not a.no_clusters)
