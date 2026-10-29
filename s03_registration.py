@@ -3,14 +3,15 @@
 usage: s03_registration.py [PLOT ...] [--report-only] [--workers=N]
 
 The matrix set per plot is chosen in project.plots() ("registration"):
-  export  03_transforms.json and 03_transforms_dat/ from RiSCAN_OUTPUTS/<PLOT>/PRCS (refused when the PRCS folder mixes
-          frames, i.e. holds geocentric matrices)
-  coreg   as export, then sylva.coreg from those priors (scans in "no_prior" get none, so a broken export matrix cannot
-          anchor them): 03_coreg_dat/, _coreg_transforms.json, _coreg_report.txt, _coreg_before_after.json,
+  sop     03_transforms.json and 03_transforms_dat/ from the SOP matrices of the RiSCAN project (project.rsp), or for
+          source = "exports" the exported PRCS matrices (<exports>/<PLOT>/PRCS); refused when they mix frames, i.e.
+          some are geocentric ("export" is the old name of this mode)
+  coreg   as sop, then sylva.coreg from those priors (scans in "no_prior" get none, so a broken SOP cannot anchor them):
+          03_coreg_dat/, _coreg_transforms.json, _coreg_report.txt, _coreg_before_after.json,
           _registration_report_coreg.html. Every later stage uses 03_coreg_dat where it exists.
   previous  matrices delivered with the data (previous_transforms: a transforms JSON with scans[].name and world_from_scan),
-          renumbered to the stage-01 scan indices; for plots whose export matrices are unusable
-One record per stage-01 scan; a position with two export files shares its matrix. Scans listed in "unregistered" are kept
+          renumbered to the stage-01 scan indices; for plots whose SOPs are unusable
+One record per stage-01 scan; a position with two scans shares its matrix. Scans listed in "unregistered" are kept
 with registered = false. The report: pair residuals of 5 cm / 30 m samples of the scans at the matrices the merge uses,
 03_registration/<PLOT>_03_registration_report.html and _registration_residuals.json.
 """
@@ -18,7 +19,7 @@ import json, time
 from pathlib import Path
 import numpy as np
 import project
-from project import EXPORTS, ROOT, log
+from project import ROOT, log
 from s01_convert import jobs_for
 
 
@@ -34,17 +35,17 @@ def write_transforms(site, scans, matrices_from, skipped, missing):
     log(f"{site}: {len(scans)} scans, omitted {sorted(skipped)}, no matrix {missing}, unregistered {unreg}")
 
 
-def build_export(site):
-    prcs = {f.stem: np.loadtxt(f) for f in (EXPORTS / site / "PRCS").glob("*.DAT")}
+def build_sop(site):
+    prcs, origin = project.sop_matrices(site)
     far = sorted(n for n, m in prcs.items() if np.abs(m[:3, 3]).max() > 1e5)
-    if far: raise ValueError(f"{site}: {len(far)} PRCS matrices are geocentric ({far[:4]}...); use registration = 'previous' or 'coreg'")
-    _, jobs, skipped = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
+    if far: raise ValueError(f"{site}: {len(far)} SOP matrices are geocentric ({far[:4]}...); use registration = 'previous' or 'coreg'")
+    _, jobs, skipped, _ = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
     scans, missing = [], []
     for _, name, src, _, index in jobs:
         pos = name.split("#")[0]
         if pos not in prcs: missing.append(name); continue
         scans.append({"index": index, "name": name, "source": src, "registered": name not in unreg, "world_from_scan": prcs[pos].tolist()})
-    write_transforms(site, scans, f"{EXPORTS / site / 'PRCS'} (RiSCAN PRO export)", skipped, missing)
+    write_transforms(site, scans, origin, skipped, missing)
     dat = project.stage(site, "03_registration") / f"{site}_03_transforms_dat"; dat.mkdir(exist_ok=True)
     for f in dat.glob("*.DAT"): f.unlink()
     for n, m in prcs.items(): np.savetxt(dat / f"{n}.DAT", m, fmt="%.16f")
@@ -54,7 +55,7 @@ def build_previous(site):
     src = project.setting_path(site, "previous_transforms")
     if src is None: raise ValueError(f"{site}: registration = 'previous' needs previous_transforms in project.toml")
     rx = json.load(open(src))
-    M = {x["name"]: x for x in rx["scans"]}; _, jobs, skipped = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
+    M = {x["name"]: x for x in rx["scans"]}; _, jobs, skipped, _ = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
     scans, missing = [], []
     for _, name, src, _, index in jobs:
         x = M.get(name) or M.get(name.split("#")[0])
@@ -86,15 +87,15 @@ def residual_summary(clouds, T, names):
 
 
 def coreg(site, workers=None):
-    """sylva.coreg on the stage-01 scans from the export matrices; the result is put back in the project frame."""
+    """sylva.coreg on the stage-01 scans from the SOP matrices; the result is put back in the project frame."""
     import sylva
     from sylva import coreg as sc, riscan
     from sylva.registration_report import write_report
     reg = ROOT / site / "03_registration"; t0 = time.time(); no_prior = set(project.setting(site, "no_prior"))
     tj = json.load(open(reg / f"{site}_03_transforms.json"))
     names = [x["name"] for x in tj["scans"] if x.get("registered", True) and project.scan_laz(site, x["name"]).exists()]
-    proj = sylva.read_riscan_project(str(next((ROOT / site / "00_raw").glob("*.RiSCAN"))))
-    pos = {p.name: p for p in proj.with_scans(require_sop=False)}
+    proj = project.riscan_project(site)                        # levelling, targets and GNSS where the project has them
+    pos = {p.name: p for p in proj} if proj is not None else {}
     pd = reg / f"{site}_03_transforms_dat"; priors, levelling, reflectors, gnss = [], [], [], []
     for n in names:
         base = n.split("#")[0]; p = pos.get(base)
@@ -154,7 +155,8 @@ def report(site):
 def run(site, report_only=False, workers=None):
     mode = project.setting(site, "registration")
     if not report_only:
-        build_previous(site) if mode == "previous" else build_export(site)
+        if mode not in ("sop", "export", "coreg", "previous"): raise ValueError(f"{site}: unknown registration {mode!r}")
+        build_previous(site) if mode == "previous" else build_sop(site)
         if mode == "coreg": coreg(site, workers)
     s = report(site); project.record_run(site, "03_registration", mode=mode, median_cm=s["median_cm"], worst_cm=s["worst_cm"])
 

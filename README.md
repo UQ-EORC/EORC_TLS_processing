@@ -9,10 +9,17 @@ where the inputs are and how each plot differs from the defaults (see `project.e
 
 ## Inputs
 
-- RiSCAN PRO per-scan LAZ exports in scanner coordinates, with the project's `PRCS` matrices (`.DAT`) and a
-  `POINT_FILTERS.txt`, one folder per plot (`<exports>/<PLOT>/`).
-- The RiSCAN PRO project in `<PLOT>/00_raw/` (the `.rxp` scans), for the unfiltered pulses of stage 02 and for coreg.
-- Optional: manually segmented trees (one point cloud per tree) and a field stem map per plot.
+- The RiSCAN PRO project of each plot, unpacked in `<PLOT>/00_raw/` (one `*.RiSCAN` folder), with:
+  - `project.rsp`: the scan positions, their SOP matrices (scanner to project frame) and scan patterns;
+  - `project.rdb/SCANS/<position>/SINGLESCANS/<scan>/<scan>.rdbx`: each scan as RiSCAN PRO imported it (echoes after
+    MTA resolution), read by stage 01. Reading `.rdbx` needs RIEGL's `librdb` (RDB SDK), see `sylva.io.find_rdblib`;
+  - `SCANS/<position>/SINGLESCANS/<scan>.rxp`: the raw scans, read by stage 02 for every pulse including the misses.
+    Without them a plot gets no stages 02, 10 and 11.
+- Optional: a point filter file (`filter` in `project.toml`), manually segmented trees (one point cloud per tree) and a
+  field stem map per plot.
+
+Plots processed before this layout can read per-scan RiSCAN PRO LAZ exports with their `PRCS` matrices and
+`POINT_FILTERS.txt` instead (`source = "exports"`, files in `<exports>/<PLOT>/`).
 
 ## Running
 
@@ -31,8 +38,8 @@ with the date and the sylva version.
 
 | Step | Script | Writes | What |
 |---|---|---|---|
-| 01 | `s01_convert.py` | `01_scans` | export LAZ with the point filter applied, scanner frame |
-| 03 | `s03_registration.py` | `03_registration` | export PRCS, `sylva.coreg` from them, or a previous set (per plot); registration report |
+| 01 | `s01_convert.py` | `01_scans` | each scan's `.rdbx` with the point filter applied, scanner frame |
+| 03 | `s03_registration.py` | `03_registration` | the project's SOPs, `sylva.coreg` from them, or a previous set (per plot); registration report |
 | 02 | `s02_shots.py` | `02_shots` | every pulse from the raw `.rxp`, unfiltered, misses rebuilt (runs after 03: it reads the scan list) |
 | 04 | `s04_merge.py` | `04_registered` | 2 cm voxel-thinned merge, tiles and one LAZ |
 | 05 | `s05_ground.py` | `05_ground`, `06_stems`, `90_qc` | DTM, CHM, automatic stems, QC figures |

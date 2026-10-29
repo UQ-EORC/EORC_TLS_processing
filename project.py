@@ -29,11 +29,11 @@ def _path(value, plot=None):
     return p if p.is_absolute() else ROOT / p
 
 
-EXPORTS = _path(_paths.get("exports", "exports"))              # RiSCAN PRO per-scan LAZ exports, <EXPORTS>/<PLOT>/
+EXPORTS = _path(_paths.get("exports", "exports"))              # legacy input (source = "exports"): <EXPORTS>/<PLOT>/*.laz
 SCRATCH = _path(os.environ.get("TLS_SCRATCH", _paths.get("scratch", "~/tls_scratch")))
 RCT_SIF = str(_path(_paths["raycloudtools_sif"])) if "raycloudtools_sif" in _paths else os.environ.get("RCT_SIF")
 PYARROW_PYTHON = str(_path(_paths["pyarrow_python"])) if "pyarrow_python" in _paths else sys.executable
-DEFAULTS = {"registration": "export", "filter": None, "unregistered": [], "no_prior": [], "previous_transforms": None,
+DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter": None, "unregistered": [], "no_prior": [], "previous_transforms": None,
             "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
             "inventory_x": "x", "inventory_y": "y", "code": None, "name": None}
 DEFAULTS.update(CONFIG.get("defaults", {}))
@@ -41,9 +41,9 @@ PLOT_BOX = {"size_m": 100.0, "tolerance_m": 4.0, "isolated_stem_m": 15.0, **CONF
 
 
 def plots():
-    """The plots of the project: [plots.<NAME>] tables in project.toml, else every folder in the exports folder."""
+    """The plots of the project: [plots.<NAME>] tables in project.toml, else every folder holding a RiSCAN project in 00_raw."""
     if CONFIG.get("plots"): return list(CONFIG["plots"])
-    return sorted(p.name for p in EXPORTS.iterdir() if p.is_dir()) if EXPORTS.exists() else []
+    return sorted(p.parent.parent.name for p in ROOT.glob("*/00_raw/*.RiSCAN") if p.is_dir())
 
 
 def setting(plot, key):
@@ -52,6 +52,66 @@ def setting(plot, key):
 
 def setting_path(plot, key): return _path(setting(plot, key), plot)
 def has_trees(plot): return bool(setting(plot, "manual_trees"))
+
+
+def riscan_dir(plot):
+    """The plot's RiSCAN PRO project: the "riscan" setting, else the one *.RiSCAN folder in <PLOT>/00_raw (None if there is none)."""
+    p = setting_path(plot, "riscan")
+    if p: return p
+    found = sorted(d for d in (ROOT / plot / "00_raw").glob("*.RiSCAN") if d.is_dir())
+    if len(found) > 1: raise ValueError(f"{plot}: {len(found)} RiSCAN projects in 00_raw; set riscan in project.toml")
+    return found[0] if found else None
+
+
+_riscan = {}
+
+
+def riscan_project(plot):
+    """The plot's RiSCAN project parsed by sylva (positions, SOP matrices, scan patterns, .rxp files); None without one."""
+    if plot not in _riscan:
+        d = riscan_dir(plot)
+        if d is None: _riscan[plot] = None
+        else:
+            import sylva
+            _riscan[plot] = sylva.read_riscan_project(str(d))
+    return _riscan[plot]
+
+
+def has_rxp(plot):
+    """Whether the plot's RiSCAN project holds its .rxp scans (stages 02 and 10 need them)."""
+    proj = riscan_project(plot)
+    return proj is not None and any(p.rxp is not None for p in proj)
+
+
+def scan_files(plot):
+    """{position: [point files]} that stage 01 reads, in file-name order. source = "riscan": every position of
+    project.rsp with each of its scans' .rdbx, the RiSCAN PRO database of the imported scan
+    (<project>/project.rdb/SCANS/<position>/SINGLESCANS/<scan>/<scan>.rdbx), an empty list where there is none;
+    source = "exports" (legacy): the per-scan RiSCAN PRO LAZ exports, <exports>/<PLOT>/<position> ... .laz."""
+    out = {}
+    if setting(plot, "source") == "exports":
+        for f in sorted(EXPORTS.joinpath(plot).glob("*.laz"), key=lambda p: p.name.lower()):
+            m = re.match(r"^(ScanPos\d+|tilt ?\d+)", f.name, re.I)
+            if not m: raise ValueError(f"cannot name {f}")
+            n = m.group(1)
+            out.setdefault("tilt " + re.sub(r"\D", "", n) if n.lower().startswith("tilt") else n, []).append(f)  # 'tilt 001', as the SOPs are named
+        return out
+    d = riscan_dir(plot)
+    if d is None: raise FileNotFoundError(f"{plot}: no RiSCAN project in 00_raw (a zipped one must be unpacked)")
+    for pos in riscan_project(plot):
+        out[pos.name] = sorted((d / "project.rdb" / "SCANS" / pos.name / "SINGLESCANS").glob("*/*.rdbx"))
+    return out
+
+
+def sop_matrices(plot):
+    """{position: 4x4 scanner-to-project matrix} as the data came: the RiSCAN project's SOPs (project.rsp), or for
+    source = "exports" the exported PRCS matrices (<exports>/<PLOT>/PRCS/*.DAT); and where they came from."""
+    if setting(plot, "source") == "exports":
+        d = EXPORTS / plot / "PRCS"
+        return {f.stem: np.loadtxt(f) for f in d.glob("*.DAT")}, f"{d} (RiSCAN PRO export)"
+    proj = riscan_project(plot)
+    if proj is None: raise FileNotFoundError(f"{plot}: no RiSCAN project in 00_raw")
+    return {p.name: np.asarray(p.sop, float) for p in proj if p.sop is not None}, f"{riscan_dir(plot) / 'project.rsp'} (SOP)"
 
 
 def stage(plot, folder):

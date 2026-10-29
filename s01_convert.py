@@ -1,19 +1,22 @@
-"""Stage 01: one filtered LAZ per scan from the RiSCAN PRO LAZ exports (scanner coordinates).
+"""Stage 01: one filtered LAZ per scan, in scanner coordinates, from the scans of the plot's RiSCAN PRO project.
 
 usage: s01_convert.py [PLOT ...] [--workers=4] [--only=ScanPos001,...]
 
-Input: <exports>/<PLOT>/*.laz (one RiSCAN PRO export per scan, scanner coordinates) and the point filter: the plot's
-"filter" file in project.toml if set, else <exports>/<PLOT>/POINT_FILTERS.txt. Filter keys:
-  range lo hi            scanner range (the exports are in SOCS, so range = |xyz|)
-  reflectance lo hi      dB (the export stores it x100 as int16)
+Input: each scan's .rdbx in the RiSCAN project in <PLOT>/00_raw (project.rdb/SCANS/<position>/SINGLESCANS/<scan>/
+<scan>.rdbx: the echoes of the .rxp after MTA resolution, as RiSCAN PRO imported them), read with sylva (needs RIEGL's
+librdb). Plots with source = "exports" in project.toml read the older per-scan RiSCAN PRO LAZ exports
+(<exports>/<PLOT>/*.laz) instead. The point filter is the plot's "filter" file in project.toml; for source = "exports"
+it defaults to <exports>/<PLOT>/POINT_FILTERS.txt, otherwise no filter is applied. Filter keys:
+  range lo hi            scanner range (the scans are in SOCS, so range = |xyz|)
+  reflectance lo hi      dB
   deviation lo hi        RIEGL pulse-shape deviation
-  amplitude lo hi        dB, x100 in the export
-  omit p1 p2 ...         scan positions left out
+  amplitude lo hi        dB
+  omit p1 p2 ...         scan positions left out (by number)
 Output: 01_scans/<PLOT>_01_<scan>.laz with reflectance, amplitude, deviation, range, return_number and
 number_of_returns (recounted after filtering; a pulse = the points sharing a gps_time), echo_type (RIEGL type before
 filtering: 0 single, 1 first, 2 interior, 3 last), gps_time, point_source_id (the position's index); plus
-<PLOT>_01_filter.txt and <PLOT>_01_manifest.json. Resumable: a scan whose LAZ exists for the same export file is skipped.
-A position with two export files gives ScanPosNNN and ScanPosNNN#2.
+<PLOT>_01_filter.txt and <PLOT>_01_manifest.json. Resumable: a scan whose LAZ exists for the same source file is skipped.
+A position with two scans gives ScanPosNNN and ScanPosNNN#2.
 """
 import json, os, re, time, traceback
 from concurrent.futures import ProcessPoolExecutor
@@ -22,7 +25,7 @@ import numpy as np
 import project
 from project import EXPORTS, log
 
-NAME = re.compile(r"^(ScanPos\d+|tilt ?\d+)", re.I)
+RDBX_ATTRS = ["reflectance", "amplitude", "deviation", "target_index", "target_count", "timestamp"]
 
 
 def read_filters(path):
@@ -36,31 +39,35 @@ def read_filters(path):
     return st
 
 
-def scan_name(path):
-    m = NAME.match(Path(path).name)
-    if not m: raise ValueError(f"cannot name {path}")
-    n = m.group(1)
-    return "tilt " + re.sub(r"\D", "", n) if n.lower().startswith("tilt") else n      # 'tilt 001', as the SOP files are named
-
-
 def filter_file(site):
-    return project.setting_path(site, "filter") or EXPORTS / site / "POINT_FILTERS.txt"
+    """The plot's point filter file, or None (no filter)."""
+    f = project.setting_path(site, "filter")
+    if f: return f
+    if project.setting(site, "source") == "exports": return EXPORTS / site / "POINT_FILTERS.txt"
+    return None
+
+
+def position_key(name):
+    """Upright positions before tilt ones, each in number order (ScanPos002 before ScanPos010)."""
+    d = re.sub(r"\D", "", name)
+    return name.lower().startswith("tilt"), int(d) if d else 10 ** 9, name.lower()
 
 
 def jobs_for(site, only=None):
-    """(filters, [(site, name, export file, filters, position index)], omitted positions). Positions are numbered in
-    name order, upright before tilt; the index is the point_source_id every later stage uses."""
-    st = read_filters(filter_file(site)); omit = st.get("omit", set())
-    by_pos = {}
-    for f in sorted(EXPORTS.joinpath(site).glob("*.laz"), key=lambda p: p.name.lower()): by_pos.setdefault(scan_name(f), []).append(f)
-    names = sorted(by_pos, key=lambda n: (n.lower().startswith("tilt"), int(re.sub(r"\D", "", n))))
-    jobs, skipped = [], []
+    """(filters, [(site, name, scan file, filters, position index)], omitted positions, positions without a scan file).
+    Every position is numbered, in name order, upright before tilt, whether or not it has a scan; the index is the
+    point_source_id every later stage uses."""
+    ff = filter_file(site); st = read_filters(ff) if ff else {}; omit = st.get("omit", set())
+    by_pos = project.scan_files(site)
+    names = sorted(by_pos, key=position_key)
+    jobs, skipped, empty = [], [], []
     for i, n in enumerate(names, 1):
-        if int(re.sub(r"\D", "", n)) in omit and not n.lower().startswith("tilt"): skipped.append(n); continue
+        if position_key(n)[1] in omit and not n.lower().startswith("tilt"): skipped.append(n); continue
+        if not by_pos[n]: empty.append(n); continue
         for k, f in enumerate(by_pos[n], 1):
             nm = n if k == 1 else f"{n}#{k}"
             if not only or nm in only: jobs.append((site, nm, str(f), st, i))
-    return st, jobs, skipped
+    return st, jobs, skipped, empty
 
 
 def convert_one(args):
@@ -69,10 +76,16 @@ def convert_one(args):
     laz = project.scan_laz(site, name); tmp = laz.with_name(laz.stem + ".part.laz")
     try:
         t0 = time.time()
-        c = io.read(src); n_in = len(c); xyz = c.xyz; a = c.attrs
+        if src.lower().endswith(".rdbx"):                     # RiSCAN project database: dB as floats
+            c = io.read_rdbx(src, attributes=RDBX_ATTRS); a = c.attrs
+            refl = a["reflectance"].astype(np.float32); amp = a["amplitude"].astype(np.float32)
+            dev = a["deviation"].astype(np.int32)
+        else:                                                 # RiSCAN PRO LAZ export: dB x100 as integers
+            c = io.read(src); a = c.attrs
+            refl = a["Reflectance"].astype(np.float32) / 100.0; amp = a["Amplitude"].astype(np.float32) / 100.0
+            dev = a["Deviation"].astype(np.int32)
+        n_in = len(c); xyz = c.xyz
         rng = np.linalg.norm(xyz, axis=1).astype(np.float32)
-        refl = a["Reflectance"].astype(np.float32) / 100.0; amp = a["Amplitude"].astype(np.float32) / 100.0
-        dev = a["Deviation"].astype(np.int32)
         rn0 = a["return_number"].astype(np.uint8); nr0 = a["number_of_returns"].astype(np.uint8)
         keep = np.ones(n_in, bool); dropped = {}
         for key, v in (("range", rng), ("reflectance", refl), ("deviation", dev), ("amplitude", amp)):
@@ -101,16 +114,20 @@ def convert_one(args):
 
 def run(site, workers=4, only=None):
     out = project.stage(site, "01_scans")
-    st, jobs, skipped = jobs_for(site, only); ff = filter_file(site)
-    (out / f"{site}_01_filter.txt").write_text(f"# applied to every scan of {site} by s01_convert.py; source: {EXPORTS / site} (scanner coordinates)\n"
-                                               f"# from {ff}\n" + ff.read_text().strip() + "\n" + (f"# positions omitted: {sorted(skipped)}\n" if skipped else ""))
+    st, jobs, skipped, empty = jobs_for(site, only); ff = filter_file(site)
+    source = (f"RiSCAN PRO LAZ export, {EXPORTS / site}" if project.setting(site, "source") == "exports"
+              else f"RiSCAN PRO project scans (.rdbx), {project.riscan_dir(site)}")
+    (out / f"{site}_01_filter.txt").write_text(f"# applied to every scan of {site} by s01_convert.py; source: {source} (scanner coordinates)\n"
+                                               + (f"# from {ff}\n" + ff.read_text().strip() + "\n" if ff else "# no point filter\n")
+                                               + (f"# positions omitted: {sorted(skipped)}\n" if skipped else ""))
     mf = out / f"{site}_01_manifest.json"
-    man = project.jload(mf) or {"site": site, "source": f"RiSCAN PRO LAZ export, {EXPORTS / site}", "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
-                             "filters": {k: (sorted(v) if isinstance(v, set) else list(v)) for k, v in st.items()}, "filter_file": str(ff),
+    man = project.jload(mf) or {"site": site, "source": source, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
+                             "filters": {k: (sorted(v) if isinstance(v, set) else list(v)) for k, v in st.items()}, "filter_file": str(ff) if ff else None,
                              "omitted_positions": sorted(skipped), "scans": {}}
+    man["positions_without_scan"] = empty
     todo = [j for j in jobs if not ("error" not in man["scans"].get(j[1], {"error": 1}) and man["scans"][j[1]].get("file") == Path(j[2]).name
                                     and project.scan_laz(site, j[1]).exists())]
-    log(f"{site}: {len(todo)} of {len(jobs)} scans to convert ({len(skipped)} positions omitted)")
+    log(f"{site}: {len(todo)} of {len(jobs)} scans to convert ({len(skipped)} positions omitted, {len(empty)} without a scan: {empty[:6]})")
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, (name, res) in enumerate(pool.map(convert_one, todo), 1):

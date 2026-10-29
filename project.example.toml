@@ -2,14 +2,17 @@
 # unless absolute; {plot} is replaced by the plot's name. Every key is optional.
 
 [paths]
-exports = "exports"                     # RiSCAN PRO exports: <exports>/<PLOT>/*.laz (one per scan, SOCS), POINT_FILTERS.txt, PRCS/*.DAT
+# exports = "exports"                   # only for source = "exports": <exports>/<PLOT>/*.laz (one per scan, SOCS), POINT_FILTERS.txt, PRCS/*.DAT
 scratch = "~/tls_scratch"               # fast local disk for temporary files ($TLS_SCRATCH overrides)
 raycloudtools_sif = "/path/to/raycloudtools.sif"   # apptainer image with rayextract, for the raycloudtools QSMs ($RCT_SIF)
 pyarrow_python = "/path/to/python"      # a Python with pyarrow, for merge_shots.py (default: the running Python)
 
 [defaults]                              # apply to every plot unless the plot sets its own
-registration = "export"                 # export: the exports' PRCS matrices; coreg: sylva.coreg from them; previous: previous_transforms
-# filter = "{plot}/01_scans/my_filter.txt"   # point filter file instead of <exports>/<PLOT>/POINT_FILTERS.txt
+source = "riscan"                       # riscan: the RiSCAN PRO project in <PLOT>/00_raw (.rdbx scans, .rxp pulses, SOPs from project.rsp)
+                                        # exports: per-scan RiSCAN PRO LAZ exports in <exports>/<PLOT> (older plots)
+# riscan = "{plot}/00_raw/MyPlot.RiSCAN"  # the project, if 00_raw holds more than one *.RiSCAN folder
+registration = "sop"                    # sop: the project's SOP matrices; coreg: sylva.coreg from them; previous: previous_transforms
+# filter = "filters/point_filter.txt"   # point filter file (range, reflectance, deviation, amplitude, omit); none by default
 # previous_transforms = "{plot}/03_registration/delivered_transforms.json"   # scans[].name, world_from_scan (4x4)
 # manual_trees = "../trees/{plot}"      # one point cloud per tree (.ply/.las/.laz); the plot gets stages 07-09
 # manual_trees_table = "../trees/{plot}/trees.csv"   # columns treeid, file (relative to manual_trees); else id = last number in the name
@@ -24,12 +27,12 @@ size_m = 100                            # plot side; an inventory spanning size_
 tolerance_m = 4
 isolated_stem_m = 15                    # inventory stems farther than this from any other are ignored
 
-[plots.PLOT_A_2025]                     # one table per plot; the name is the plot's folder (and its exports folder)
+[plots.PLOT_A_2025]                     # one table per plot; the name is the plot's folder
 code = "PLTA"                           # optional site code and name, carried into the records
 name = "Plot A"
 
 [plots.PLOT_B_2025]
 registration = "coreg"
-no_prior = ["ScanPos012"]               # scans whose export matrix is wrong: coreg places them without it
+no_prior = ["ScanPos012"]               # scans whose SOP is wrong: coreg places them without it
 unregistered = ["tilt 003"]             # scans in the project that were never registered
 manual_trees = "../trees/{plot}"

@@ -2,11 +2,13 @@
 
 usage: s02_shots.py [PLOT ...] [--workers=4] [--dry-run]
 
-The RiSCAN exports carry no pulse timing, so the pulses are read from the raw .rxp in 00_raw (the RiSCAN project),
-with missed pulses rebuilt from the scan pattern (sylva.io.read_rxp_shots, fill_missing). No point filter: every echo
+The stage-01 scans hold echoes only, so the pulses are read from the raw .rxp of the RiSCAN project in 00_raw
+(<project>/SCANS/<position>/SINGLESCANS/<scan>.rxp), with missed pulses rebuilt from the scan pattern in project.rsp
+(sylva.io.read_rxp_shots, fill_missing). No point filter: every echo
 is kept except those closer than 0.5 m (the scanner head). A point filter (reflectance floor, deviation cap) removes
 every pulse whose echoes all fail it, which overstates gaps and understates plant area.
-Each scan of 03_transforms.json is matched to its .rxp by position and by the time stamp in its source file name.
+Each scan of 03_transforms.json is matched to its .rxp by position and by the time stamp in its source file name
+(<scan>.rdbx, or the export's file name).
 
   02_shots/<PLOT>_02_<scan>_shots.parquet   scanner frame, all echoes >= 0.5 m, misses included;
                                             echo attributes reflectance, amplitude, deviation
@@ -28,10 +30,8 @@ def shots_file(site, name): return ROOT / site / "02_shots" / f"{site}_02_{name}
 
 def jobs_for(site):
     """(site, name, rxp path, theta limits) per registered scan of 03_transforms.json, and the scans that could not be matched."""
-    import sylva
-    raw = list((ROOT / site / "00_raw").glob("*.RiSCAN"))
-    if not raw: raise FileNotFoundError(f"{site}: no RiSCAN project folder in 00_raw (unzip it first)")
-    proj = sylva.read_riscan_project(str(raw[0]))
+    proj = project.riscan_project(site)
+    if proj is None: raise FileNotFoundError(f"{site}: no RiSCAN project folder in 00_raw (unzip it first)")
     pos = {p.name: p for p in proj.with_scans(require_sop=False) if p.rxp is not None and p.pattern is not None}
     tj = json.load(open(ROOT / site / "03_registration" / f"{site}_03_transforms.json"))
     jobs, bad = [], []

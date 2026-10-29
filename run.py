@@ -3,7 +3,7 @@
 usage: run.py [PLOT ...] [--from=STEP] [--to=STEP] [--dry-run] [--skip-editing]
 
 Steps, in order (each runs `python <script> PLOT` in its own process, so memory is freed between them):
-  01  s01_convert.py        RiSCAN exports -> filtered scans
+  01  s01_convert.py        RiSCAN project scans (.rdbx) -> filtered scans
   03  s03_registration.py   matrices (export / coreg / previous set), registration report
   02  s02_shots.py          unfiltered pulses from the raw .rxp (needs the stage-03 scan list)
   04  s04_merge.py          2 cm registered merge
@@ -24,7 +24,7 @@ import s01_convert, s02_shots, s03_registration, s04_merge, s05_ground, s07_tree
 
 
 def has_trees(site): return bool(project.has_trees(site))
-def has_rxp(site): return any((ROOT / site / "00_raw").glob("*.RiSCAN"))   # no unpacked RiSCAN project: no pulses
+def has_rxp(site): return project.has_rxp(site)   # no unpacked RiSCAN project with its .rxp scans: no pulses
 
 
 STEPS = [  # (id, script and extra arguments, done(site), applies(site))
