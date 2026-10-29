@@ -65,4 +65,5 @@ def run_site(site, first, last, dry, skip_editing):
 if __name__ == "__main__":
     p = project.parser(__doc__); p.add_argument("--from", dest="first", default="01", choices=ORDER); p.add_argument("--to", dest="last", default="10", choices=ORDER)
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--skip-editing", action="store_true"); a = p.parse_args()
+    project.check_plots(a.sites or list(project.plots()))
     for s in a.sites or list(project.plots()): run_site(s, a.first, a.last, a.dry_run, a.skip_editing)

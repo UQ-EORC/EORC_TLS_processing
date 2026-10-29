@@ -13,8 +13,9 @@ where the inputs are and how each plot differs from the defaults (see `project.e
   - `project.rsp`: the scan positions, their SOP matrices (scanner to project frame) and scan patterns;
   - `project.rdb/SCANS/<position>/SINGLESCANS/<scan>/<scan>.rdbx`: each scan as RiSCAN PRO imported it (echoes after
     MTA resolution), read by stage 01. Reading `.rdbx` needs RIEGL's `librdb` (RDB SDK), see `sylva.io.find_rdblib`;
-  - `SCANS/<position>/SINGLESCANS/<scan>.rxp`: the raw scans, read by stage 02 for every pulse including the misses.
-    Without them a plot gets no stages 02, 10 and 11.
+  - `SCANS/<position>/SINGLESCANS/<scan>.rxp`, or for newer scanners the scanner's own project that RiSCAN PRO links
+    them from (`<project>/<name>.PROJ/<position>.SCNPOS/scans/<scan>.rxp`): the raw scans, read by stage 02 for every
+    pulse including the misses. Without them a plot gets no stages 02, 10 and 11.
 - Optional: a point filter file (`filter` in `project.toml`), manually segmented trees (one point cloud per tree) and a
   field stem map per plot.
 
@@ -27,6 +28,7 @@ Plots processed before this layout can read per-scan RiSCAN PRO LAZ exports with
 export TLS_PROJECT=/path/to/project      # or --project=PATH on any script, or run from the project folder
 python run.py --dry-run                  # what is done and what would run, every plot
 python run.py PLOT_A_2025                # everything still to do for one plot
+python run.py /path/to/project/PLOT_A_2025   # the same; a plot given as a folder sets the project root
 python run.py PLOT_A_2025 --from=08 --to=99
 python s05_ground.py PLOT_A_2025 PLOT_B_2025   # one step, two plots
 ```

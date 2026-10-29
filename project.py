@@ -14,7 +14,11 @@ def _root():
     for a in sys.argv[1:]:
         if a.startswith("--project="): return Path(a.split("=", 1)[1]).expanduser().resolve()
     if "--project" in sys.argv[:-1]: return Path(sys.argv[sys.argv.index("--project") + 1]).expanduser().resolve()
-    return Path(os.environ.get("TLS_PROJECT", ".")).expanduser().resolve()
+    if "TLS_PROJECT" in os.environ: return Path(os.environ["TLS_PROJECT"]).expanduser().resolve()
+    for a in sys.argv[1:]:                                     # a plot given as a folder path: its parent is the project
+        if os.sep in a and not a.startswith("-") and (Path(a).expanduser() / "00_raw").is_dir():
+            return Path(a).expanduser().resolve().parent
+    return Path(".").resolve()
 
 
 ROOT = _root()
@@ -73,8 +77,19 @@ def riscan_project(plot):
         if d is None: _riscan[plot] = None
         else:
             import sylva
-            _riscan[plot] = sylva.read_riscan_project(str(d))
+            proj = sylva.read_riscan_project(str(d))
+            for pos in proj:
+                if pos.rxp is None:                               # scans linked from the scanner's .PROJ (data source)
+                    pos.scans = linked_rxp(d, pos.name); pos.rxp = pos.scans[0] if pos.scans else None
+            _riscan[plot] = proj
     return _riscan[plot]
+
+
+def linked_rxp(riscan, position):
+    """The .rxp of a position that RiSCAN PRO links from the scanner's own project instead of copying into SCANS (newer
+    scanners: <project>/<data source>.PROJ/<position>.SCNPOS/scans/<scan>.rxp); monitoring and residual files left out."""
+    return sorted(f for f in Path(riscan).glob(f"*.PROJ/{position}.SCNPOS/scans/*.rxp")
+                  if not f.name.endswith((".mon.rxp", ".residual.rxp")))
 
 
 def has_rxp(plot):
@@ -133,17 +148,32 @@ def jsave(obj, path):
     tmp.write_text(json.dumps(obj, indent=1, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o))); os.replace(tmp, p)
 
 
+def plot_name(arg):
+    """A plot given by name or as its folder (a path inside the project root)."""
+    if os.sep not in arg: return arg
+    p = Path(arg).expanduser().resolve()
+    if p.parent != ROOT: raise argparse.ArgumentTypeError(f"{arg} is not a plot folder of the project {ROOT}")
+    return p.name
+
+
 def parser(doc, sites=True):
     """An argparse parser whose description is the script's docstring; PLOT arguments (none = every plot) and --project."""
     p = argparse.ArgumentParser(description=doc, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", default=None, help="project root holding project.toml (default: $TLS_PROJECT, else the current directory)")
-    if sites: p.add_argument("sites", nargs="*", metavar="PLOT", help="plot folders (default: every plot)")
+    if sites: p.add_argument("sites", nargs="*", metavar="PLOT", type=plot_name, help="plot names or folders (default: every plot)")
     return p
+
+
+def check_plots(sites):
+    """Refuse plots that have no folder in the project root (usually: the wrong root, e.g. run from the code folder)."""
+    missing = [s for s in sites if not (ROOT / s).is_dir()]
+    if missing: sys.exit(f"no plot folder {missing} in the project root {ROOT}; give --project=PATH, set TLS_PROJECT, "
+                         "run from the project folder, or name the plot by its folder path")
 
 
 def for_sites(fn, sites, label, *args, **kw):
     """fn(plot, ...) for each plot; a failure is logged to 99_meta/<PLOT>_99_error_<label>.txt and the next plot runs."""
-    ok = True
+    ok = True; check_plots(sites or plots())
     for s in sites or plots():
         try: fn(s, *args, **kw)
         except Exception:
