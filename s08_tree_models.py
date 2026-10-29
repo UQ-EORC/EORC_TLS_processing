@@ -177,6 +177,7 @@ def remove_tree(site, tid):
 
 def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
     if not project.has_trees(site) and not project.edited_tiles_dir(site).exists(): log(f"{site}: no trees"); return
+    if do_rct and not project.RCT_SIF: log(f"{site}: no raycloudtools image (raycloudtools_sif, $RCT_SIF): sylva QSMs only"); do_rct = False
     t0 = time.time(); q = project.stage(site, "08_qsm"); lw = project.stage(site, "09_leafwood")
     rct_dir, syl_dir = q / f"{site}_08_rct", q / f"{site}_08_sylva"; rct_dir.mkdir(exist_ok=True); syl_dir.mkdir(exist_ok=True)
     origins, src = scan_origins(site); dtm = project.load_dtm(site); dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution}

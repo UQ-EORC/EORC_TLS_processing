@@ -85,9 +85,30 @@ The transferred tree labels are a starting point; the edited ones are what stage
 Plots without manual trees have no labels to start from: segment them first (for example `sylva trees --segment` on a
 height-normalised cloud) and open that file in segfix.
 
-## Requirements
+## Install
 
-Python 3.11+, sylva, laspy, rasterio, scipy, matplotlib; apptainer and a raycloudtools image for the raycloudtools
-QSMs; a Python with pyarrow for `merge_shots.py`; segfix for editing (`pip install segfix`, Python 3.10-3.12, its own
-environment). Memory: stages 04 and 05 take 10-30 GB per plot, a stage-02 worker can take over 12 GB on dense scans,
-the stage-10 tracing is capped at 20 GB.
+With conda (or mamba), from this folder:
+
+```bash
+conda env create -f environment.yml      # Python 3.12, sylva, segfix, laspy, rasterio, scipy, matplotlib, pyarrow
+conda activate tls
+python run.py --help
+```
+
+`environment.yml` installs everything the scripts import, segfix included, so the editing step runs from the same
+environment (`segfix` opens the GUI). To update later: `conda env update -f environment.yml --prune`.
+
+Three things come from outside conda:
+
+- **RIEGL libraries** (proprietary, not redistributable; from RIEGL's members area): the RDB SDK (`librdb`) to read
+  `.rdbx` in stage 01, and RiVLib (`libscanifc`) to read `.rxp` in stage 02. Unpack them in `~/.local/lib` (for example
+  `~/.local/lib/rdblib-2.4.1-x86_64-linux/` and `~/.local/lib/rivlib-2_6_0-x86_64-linux-gcc11/`), where sylva finds them,
+  or point `RDBLIB_PATH` and `RIVLIB_PATH` at them. Check with
+  `python -c "import sylva.io as io; print(io.find_rdblib(), io.find_rivlib())"`.
+- **raycloudtools** for the raycloudtools QSMs of stage 08: apptainer and an image with `rayextract`, given as
+  `raycloudtools_sif` in `project.toml` (or `$RCT_SIF`). Without it stage 08 makes the sylva QSMs only.
+- **The project folder**: a `project.toml` in the folder that holds the plots (copy `project.example.toml`), then
+  `export TLS_PROJECT=/path/to/project` or pass `--project=PATH`.
+
+Memory: stages 04 and 05 take 10-30 GB per plot, a stage-02 worker can take over 12 GB on dense scans, the stage-10
+tracing is capped at 20 GB.

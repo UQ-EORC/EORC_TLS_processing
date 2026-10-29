@@ -5,7 +5,7 @@
 # exports = "exports"                   # only for source = "exports": <exports>/<PLOT>/*.laz (one per scan, SOCS), POINT_FILTERS.txt, PRCS/*.DAT
 scratch = "~/tls_scratch"               # fast local disk for temporary files ($TLS_SCRATCH overrides)
 raycloudtools_sif = "/path/to/raycloudtools.sif"   # apptainer image with rayextract, for the raycloudtools QSMs ($RCT_SIF)
-pyarrow_python = "/path/to/python"      # a Python with pyarrow, for merge_shots.py (default: the running Python)
+# pyarrow_python = "/path/to/python"    # a Python with pyarrow, for merge_shots.py (default: the running Python; the conda env has it)
 
 [defaults]                              # apply to every plot unless the plot sets its own
 source = "riscan"                       # riscan: the RiSCAN PRO project in <PLOT>/00_raw (.rdbx scans, .rxp pulses, SOPs from project.rsp)
