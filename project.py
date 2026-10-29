@@ -227,10 +227,11 @@ def for_sites(fn, sites, label, *args, **kw):
 
 
 def matrices(plot):
-    """{scan name: 4x4 world_from_scan} the merge uses, and where they came from: the coreg set if present, else 03_transforms."""
+    """{scan name: 4x4 world_from_scan} the merge uses, and where they came from: the coreg set while the plot's registration
+    is "coreg" (a set left from an earlier coreg run is ignored once the setting changes), else 03_transforms."""
     reg = ROOT / plot / "03_registration"
-    cd = reg / f"{plot}_03_coreg_dat"
-    if cd.exists():                                            # s03 coreg: one <scan>.DAT per scan coreg registered, project frame
+    cd = coreg_dir(plot)
+    if cd is not None:                                            # s03 coreg: one <scan>.DAT per scan coreg registered, project frame
         return {f.stem: np.loadtxt(f) for f in cd.glob("*.DAT")}, "03_coreg_dat (sylva.coreg)"
     # 03_transforms.json has one record per stage-01 scan; the ones marked registered = false are left out
     j = json.load(open(reg / f"{plot}_03_transforms.json"))
@@ -238,10 +239,15 @@ def matrices(plot):
             "03_transforms: " + j.get("matrices_from", ""))
 
 
+def coreg_dir(plot):
+    """03_registration/<PLOT>_03_coreg_dat when the plot's registration is "coreg" and stage 03 has written it, else None."""
+    d = ROOT / plot / "03_registration" / f"{plot}_03_coreg_dat"
+    return d if setting(plot, "registration") == "coreg" and d.exists() else None
+
+
 def matrices_dir(plot):
-    """The folder of .DAT matrices the merge uses."""
-    reg = ROOT / plot / "03_registration"; d = reg / f"{plot}_03_coreg_dat"
-    return d if d.exists() else reg / f"{plot}_03_transforms_dat"
+    """The folder of .DAT matrices the merge uses: the coreg set (see coreg_dir), else 03_transforms_dat."""
+    return coreg_dir(plot) or ROOT / plot / "03_registration" / f"{plot}_03_transforms_dat"
 
 
 def trees_frame_dir(plot):
@@ -275,6 +281,13 @@ def load_raster(path):
 
 # The plot's 1 m DTM from stage 05 (05_ground/<PLOT>_05_dtm_1m.tif) as a sylva Raster, project frame.
 def load_dtm(plot): return load_raster(ROOT / plot / "05_ground" / f"{plot}_05_dtm_1m.tif")
+
+
+def same_bounds(stored, plot):
+    """Whether a plot box stored in a record (a dict with xmin..ymax or a 4-sequence) is the plot's current one (to 1 mm)."""
+    if stored is None: return False
+    if isinstance(stored, dict): stored = [stored[k] for k in ("xmin", "ymin", "xmax", "ymax")]
+    return bool(np.allclose(np.asarray(stored, float), np.asarray(plot_bounds(plot), float), atol=1e-3))
 
 
 def plot_bounds(plot):

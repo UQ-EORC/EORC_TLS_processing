@@ -54,6 +54,18 @@ def filter_file(site):
     return None
 
 
+def filter_record(st):
+    """The filter values as the manifest records them (JSON-safe lists), without "omit": a changed filter redoes every scan,
+    a changed omit list only changes which scans there are."""
+    return {k: list(v) for k, v in st.items() if k != "omit"}
+
+
+def filter_changed(site, man):
+    """Whether the plot's current filter differs from the one its stage-01 manifest was made with."""
+    ff = filter_file(site)
+    return man.get("filters") is not None and filter_record(read_filters(ff) if ff else {}) != {k: v for k, v in man["filters"].items() if k != "omit"}
+
+
 def position_key(name):
     """Upright positions before tilt ones, each in number order (ScanPos002 before ScanPos010).
 
@@ -158,13 +170,16 @@ def run(site, workers=4, only=None):
                                                + (f"# from {ff}\n" + ff.read_text().strip() + "\n" if ff else "# no point filter\n")
                                                + (f"# positions omitted: {sorted(skipped)}\n" if skipped else ""))
     mf = out / f"{site}_01_manifest.json"
-    # an existing manifest is carried on (its header, filters included, is kept as first written); else a new one
-    man = project.jload(mf) or {"site": site, "source": source, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
-                             "filters": {k: (sorted(v) if isinstance(v, set) else list(v)) for k, v in st.items()}, "filter_file": str(ff) if ff else None,
-                             "omitted_positions": sorted(skipped), "scans": {}}
+    # an existing manifest is carried on, unless the filter changed: then every scan is converted again
+    man = project.jload(mf)
+    if man and filter_changed(site, man):
+        log(f"{site}: the point filter changed ({man['filters']} -> {filter_record(st)}); converting every scan again"); man = None
+    man = man or {"site": site, "source": source, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration", "scans": {}}
+    man.update(filters={**filter_record(st), **({"omit": sorted(st["omit"])} if "omit" in st else {})}, filter_file=str(ff) if ff else None,
+               omitted_positions=sorted(skipped))
     man["positions_without_scan"] = empty
     # resumability: a scan is done if its manifest record has no error, names the same source file, and its LAZ exists;
-    # anything else (new, failed, source changed, LAZ deleted) is redone. A changed filter alone does not trigger a redo.
+    # anything else (new, failed, source changed, LAZ deleted) is redone. A changed filter redoes all of them (above).
     todo = [j for j in jobs if not ("error" not in man["scans"].get(j[1], {"error": 1}) and man["scans"][j[1]].get("file") == Path(j[2]).name
                                     and project.scan_laz(site, j[1]).exists())]
     log(f"{site}: {len(todo)} of {len(jobs)} scans to convert ({len(skipped)} positions omitted, {len(empty)} without a scan: {empty[:6]})")
@@ -184,12 +199,13 @@ def run(site, workers=4, only=None):
 
 
 def done(site):
-    """Whether stage 01 is complete: the manifest has totals, no errors, and every scan in it converted.
+    """Whether stage 01 is complete: the manifest has totals, no errors, every scan in it converted, and was made with the
+    plot's current point filter.
 
     Only the scans recorded in the manifest are checked, not the full job list of jobs_for.
     """
     m = project.jload(project.ROOT / site / "01_scans" / f"{site}_01_manifest.json") or {}; t = m.get("totals")
-    return bool(t) and t.get("errors", 1) == 0 and t["scans"] == len(m["scans"])
+    return bool(t) and t.get("errors", 1) == 0 and t["scans"] == len(m["scans"]) and not filter_changed(site, m)
 
 
 if __name__ == "__main__":

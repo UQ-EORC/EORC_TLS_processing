@@ -195,10 +195,11 @@ def clip(site, laz=True):
 
 
 def done(site):
-    """Whether the clip is finished for the plot: its record exists and is no older than the stage-08 manifest (new tree
-    models mean new plot totals)."""
+    """Whether the clip is finished for the plot: its record exists, was made with the current plot box, and is no older
+    than the stage-08 manifest (new tree models mean new plot totals)."""
     j = ROOT / site / "99_meta" / f"{site}_99_plot_clip.json"; m = ROOT / site / "08_qsm" / f"{site}_08_models_manifest.json"
-    return j.exists() and (not m.exists() or j.stat().st_mtime >= m.stat().st_mtime)
+    return (j.exists() and project.same_bounds(json.load(open(j)).get("plot_bounds"), site)       # made with the current plot box
+            and (not m.exists() or j.stat().st_mtime >= m.stat().st_mtime))
 
 
 if __name__ == "__main__":

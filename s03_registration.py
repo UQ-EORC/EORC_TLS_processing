@@ -57,9 +57,15 @@ def build_sop(site):
         if pos not in prcs: missing.append(name); continue
         scans.append({"index": index, "name": name, "source": src, "registered": name not in unreg, "world_from_scan": prcs[pos].tolist()})
     write_transforms(site, scans, origin, skipped, missing)
+    write_dat(site, prcs)
+
+
+def write_dat(site, mats):
+    """03_registration/<PLOT>_03_transforms_dat/: one <position>.DAT (4x4 world_from_scan, RiSCAN's text layout) per entry
+    of mats, replacing what the folder held (no stale matrices from an earlier run), so it matches 03_transforms.json."""
     dat = project.stage(site, "03_registration") / f"{site}_03_transforms_dat"; dat.mkdir(exist_ok=True)
-    for f in dat.glob("*.DAT"): f.unlink()                     # no stale matrices from an earlier run
-    for n, m in prcs.items(): np.savetxt(dat / f"{n}.DAT", m, fmt="%.16f")
+    for f in dat.glob("*.DAT"): f.unlink()
+    for n, m in mats.items(): np.savetxt(dat / f"{n}.DAT", m, fmt="%.16f")
 
 
 def build_previous(site):
@@ -67,19 +73,23 @@ def build_previous(site):
 
     Each stage-01 scan takes the record of the same name, else that of its position; it keeps the stage-01 index (so the
     point_source_id stays consistent) and is unregistered if either the previous set or "unregistered" says so. Writes
-    03_transforms.json only (no 03_transforms_dat).
+    03_transforms.json and 03_transforms_dat/ (one .DAT per scan), as the other modes do.
     """
     src = project.setting_path(site, "previous_transforms")
     if src is None: raise ValueError(f"{site}: registration = 'previous' needs previous_transforms in project.toml")
     rx = json.load(open(src))
     M = {x["name"]: x for x in rx["scans"]}; _, jobs, skipped, _ = jobs_for(site); unreg = set(project.setting(site, "unregistered"))
     scans, missing = [], []
-    for _, name, src, _, index in jobs:
+    for _, name, scan_file, _, index in jobs:
         x = M.get(name) or M.get(name.split("#")[0])
         if x is None: missing.append(name); continue
-        scans.append({"index": index, "name": name, "source": x.get("source", src), "registered": bool(x.get("registered", True)) and name not in unreg,
+        scans.append({"index": index, "name": name, "source": x.get("source", scan_file), "registered": bool(x.get("registered", True)) and name not in unreg,
                       "world_from_scan": x["world_from_scan"]})
     write_transforms(site, scans, f"previous registration ({src}), indices of the stage-01 scans", skipped, missing)
+    # one .DAT per position, like the SOP mode: a second scan ("#2") of a position shares its matrix
+    mats = {}
+    for s in scans: mats.setdefault(s["name"].split("#")[0], np.asarray(s["world_from_scan"], float))
+    write_dat(site, mats)
 
 
 def thinned(site, name):
@@ -218,6 +228,8 @@ def run(site, report_only=False, workers=None):
         # "previous" replaces the SOPs; "sop", "export" and "coreg" all start from them (coreg needs them as priors)
         build_previous(site) if mode == "previous" else build_sop(site)
         if mode == "coreg": coreg(site, workers)
+        elif (ROOT / site / "03_registration" / f"{site}_03_coreg_dat").exists():
+            log(f"{site}: registration is {mode!r}; the coreg set left in 03_registration is ignored (project.coreg_dir)")
     s = report(site); project.record_run(site, "03_registration", mode=mode, median_cm=s["median_cm"], worst_cm=s["worst_cm"])
 
 

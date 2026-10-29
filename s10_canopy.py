@@ -39,6 +39,9 @@ def run(site, voxel=0.5, buffer=20.0, workers=8, keep_shots=False):
     from sylva import Shots, canopy, voxels
     t0 = time.time(); out10 = project.stage(site, "10_voxels"); out11 = project.stage(site, "11_canopy")
     mf = out10 / f"{site}_10_11_manifest.json"
+    # traced already and only the plot box changed: the voxel profile is redone over the new box without tracing again
+    if mf.exists() and (out10 / f"{site}_10_voxels_{voxel:g}m").exists() and not done(site):
+        log(f"{site}: the plot box changed; redoing the voxel profile"); reprofile(site, voxel); return
     # scans used: those with both a matrix (project frame) and a stage-02 shots file; the rest are recorded in the manifest
     M, msrc = project.matrices(site)
     have = {n: shots_file(site, n) for n in M if shots_file(site, n).exists()}
@@ -175,8 +178,10 @@ def reprofile(site, voxel=0.5, **_):
 
 
 def done(site):
-    """Whether stages 10 and 11 are finished for the plot: the manifest, written last, exists."""
-    return (ROOT / site / "10_voxels" / f"{site}_10_11_manifest.json").exists()
+    """Whether stages 10 and 11 are finished for the plot: the manifest, written last, exists and its voxel profile is over
+    the current plot box (after the box changes, run() redoes just the profile)."""
+    rec = project.jload(ROOT / site / "10_voxels" / f"{site}_10_11_manifest.json")
+    return bool(rec) and project.same_bounds(rec["voxel"].get("profile_region", {}).get("plot_bounds"), site)
 
 
 if __name__ == "__main__":
