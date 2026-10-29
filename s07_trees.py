@@ -21,10 +21,18 @@ import numpy as np
 import project
 from project import ROOT, log
 
+# Bin edges (m) of the per-tree fit histogram: distance from each manual tree point to the nearest merged point, in 5 mm
+# steps to 10 cm. The histogram call adds a last edge at 1 m, and distances are clipped to 10 cm, so the last bin
+# collects everything from 10 cm up. The first 10 bins are the points within 5 cm.
 BINS = np.arange(0, 0.1005, 0.005)                      # fit histogram, 5 mm steps to 10 cm (+ overflow)
 
 
 def load_trees(site):
+    """The plot's manual trees as flat arrays: (xyz float32 (N, 3), tree id int32 (N,), {tree id: (xyz min, xyz max)}).
+
+    The points are in the frame of the manual trees (manual_trees_frame, or the merge's matrices). float32 halves the
+    memory and keeps sub-millimetre precision while the project coordinates stay within a few km of the origin.
+    """
     from sylva import io
     xyz, ids, bounds = [], [], {}
     for tid, f in project.manual_tree_files(site):
@@ -36,15 +44,21 @@ def load_trees(site):
 class Tiles:
     """The merged cloud's tiles, read on demand (xyz as float32), with their bounds."""
     def __init__(self, site):
+        """Catalogue the stage-04 tiles of the plot (bounds from the file headers; no points are read yet)."""
         from sylva.als import catalogue
-        self.cat = catalogue.catalog(project.merged_tiles(site)); self.cache = {}
+        self.cat = catalogue.catalog(project.merged_tiles(site)); self.cache = {}   # cache: tile path -> xyz float32
 
     def points_in(self, lo, hi):
+        """The merged points inside the axis-aligned box lo..hi (each (3,), project frame), from every tile it overlaps.
+
+        Tiles are read once and kept in the cache, so repeated queries (one per tree and block) do not re-read them; the
+        caller clears the cache when done. Returns an (n, 3) float32 array, empty when no tile overlaps.
+        """
         from sylva import io
         parts = []
         for t in self.cat.tiles:
-            b = t.bounds
-            if b[3] < lo[0] or b[0] > hi[0] or b[4] < lo[1] or b[1] > hi[1]: continue
+            b = t.bounds                                # (xmin, ymin, zmin, xmax, ymax, zmax)
+            if b[3] < lo[0] or b[0] > hi[0] or b[4] < lo[1] or b[1] > hi[1]: continue   # no plan overlap
             if t.path not in self.cache: self.cache[t.path] = io.read(str(t.path)).xyz.astype(np.float32)
             p = self.cache[t.path]; m = np.all((p >= lo) & (p <= hi), axis=1); parts.append(p[m])
         return np.concatenate(parts) if parts else np.zeros((0, 3), np.float32)
@@ -53,7 +67,7 @@ class Tiles:
 def needs_reframe(site):
     """True when the merge's matrices differ from the trees' for any scan (more than 1e-5)."""
     a, b = project.trees_frame_dir(site), project.matrices_dir(site)
-    if a == b: return False
+    if a == b: return False                             # the trees are in the merge's own frame
     old = {f.stem: np.loadtxt(f) for f in a.glob("*.DAT")}; new = {f.stem: np.loadtxt(f) for f in b.glob("*.DAT")}
     return any(not np.allclose(old[n], new[n], atol=1e-5) for n in old if n in new)
 
@@ -61,26 +75,39 @@ def needs_reframe(site):
 def reframe_trees(site, xyz, ids, bounds, tiles):
     """Each tree moved by the block motion (old -> new matrices; scans sharing a motion form a block) under which a sample of
     its points fits the merged cloud best (median nearest-point distance). Choosing by the nearest scanner failed for
-    trees near block boundaries."""
+    trees near block boundaries.
+
+    xyz, ids, bounds are load_trees' output; xyz and bounds are updated in place. tiles: a Tiles of the merge.
+    Returns {tree id: record} with the chosen block (first scan and how many more), the shift of the tree's centroid (cm),
+    and the fit (median distance in cm, share within 5 cm); a tree with no merged points near any candidate position is
+    left where it was, with a note.
+    """
     from sylva import filters
     new = {f.stem: np.loadtxt(f) for f in project.matrices_dir(site).glob("*.DAT")}; old = {f.stem: np.loadtxt(f) for f in project.trees_frame_dir(site).glob("*.DAT")}
+    # Per scan, the motion that takes a point from the trees' frame to the merge's: world_new @ inverse(world_old).
     F = {n: new[n] @ np.linalg.inv(old[n]) for n in sorted(new) if n in old}
+    # Group scans whose motions agree (translation within 5 cm, rotation within 1e-4) into blocks: a re-registration
+    # typically moves groups of scans together. Each block is represented by the motion of its first scan.
     blocks = []
     for n, m in F.items():
         for blk in blocks:
             if np.linalg.norm(m[:3, 3] - F[blk[0]][:3, 3]) < 0.05 and np.allclose(m[:3, :3], F[blk[0]][:3, :3], atol=1e-4): blk.append(n); break
         else: blocks.append([n])
+    # Largest blocks first, so a tie in fit goes to the larger block. Fixed seed: the sample, hence the result, is repeatable.
     blocks.sort(key=len, reverse=True); rng = np.random.default_rng(0); rec = {}
     for tid in sorted(bounds):
+        # Try each block's motion on a sample of up to 20,000 of the tree's points; score it by the median distance to
+        # the merged points around the moved sample (box + 30 cm). best = (median, block, share within 5 cm).
         m = ids == tid; p = xyz[m].astype(np.float64); sample = p[rng.choice(len(p), min(len(p), 20_000), replace=False)]; best = None
         for blk in blocks:
             Fm = F[blk[0]]; q = sample @ Fm[:3, :3].T + Fm[:3, 3]
             target = tiles.points_in(q.min(axis=0) - 0.3, q.max(axis=0) + 0.3)
-            if len(target) < 200: continue
+            if len(target) < 200: continue              # too few merged points there to judge the fit
             d = filters.knn(target.astype(np.float64), q, 1)[0][:, 0]; med = float(np.median(d))
             if best is None or med < best[0]: best = (med, blk, float((d < 0.05).mean()))
         if best is None:
             rec[tid] = {"block_scan": "", "block_shift_cm": "", "fit_median_cm": "", "fit_within_5cm": "", "note": "no merged points near the tree"}; continue
+        # Apply the winning motion to all of the tree's points (in place) and update its bounds.
         med, blk, within = best; Fm = F[blk[0]]; q = p @ Fm[:3, :3].T + Fm[:3, 3]
         xyz[m] = q.astype(np.float32); bounds[tid] = (q.min(axis=0), q.max(axis=0))
         rec[tid] = {"block_scan": f"{blk[0]} (+{len(blk) - 1})", "block_shift_cm": round(100 * float(np.linalg.norm(q.mean(axis=0) - p.mean(axis=0))), 1),
@@ -88,6 +115,9 @@ def reframe_trees(site, xyz, ids, bounds, tiles):
     return rec
 
 
+# attach_clusters settings (m unless noted): see its docstring. voxel: cluster connectivity grid; min_h: height above the
+# local floor below which unlabelled points are ignored; max_points: largest cluster considered; dominance,
+# min_embedded and max_share are fractions.
 CLUSTER = dict(gap=0.2, voxel=0.08, min_h=0.5, max_extent=4.0, max_points=150_000, passes=3, dominance=0.8,
                embed_radius=0.5, min_embedded=0.5, min_cluster_floor=1.0, max_share=0.3)
 
@@ -101,31 +131,43 @@ def attach_clusters(P, lab, h, gap, voxel, min_h, max_extent, max_points, passes
     lowest point is over `min_cluster_floor` above the local floor (a plant with its own base is not a fragment); and it
     holds at most `max_share` of the tree's labelled points. Clusters wider than max_extent or larger than max_points are
     left. Repeated so clusters attach through one another.
+
+    P: (n, 3) points of one tile; lab: their tree labels (0 unlabelled), updated in place; h: height of each point above
+    the local floor (ground_height). Returns the number of points labelled.
     """
     from scipy import ndimage
     from sylva import filters
     n_added = 0
     for _ in range(passes):
-        cand = np.flatnonzero((lab == 0) & (h > min_h))
+        cand = np.flatnonzero((lab == 0) & (h > min_h))           # indices into P of the unlabelled candidates
         if len(cand) == 0 or not (lab > 0).any(): break
+        # Voxelise the candidates and label connected components of occupied voxels (26-connectivity: faces, edges and
+        # corners). cid[j] is the cluster of candidate j; cluster ids run 1..n (0 is empty space and never occurs here).
         Q = P[cand]; ijk = np.floor((Q - Q.min(axis=0)) / voxel).astype(np.int64)
         occ = np.zeros(ijk.max(axis=0) + 1, bool); occ[tuple(ijk.T)] = True
         comp, n = ndimage.label(occ, structure=np.ones((3, 3, 3))); cid = comp[tuple(ijk.T)]; del occ, comp
+        # Per-cluster size, bounding box and lowest height above the floor, indexed by cluster id.
         counts = np.bincount(cid, minlength=n + 1)
         mn = np.full((n + 1, 3), np.inf); mx = np.full((n + 1, 3), -np.inf); hmin = np.full(n + 1, np.inf)
         for a in range(3): np.minimum.at(mn[:, a], cid, Q[:, a]); np.maximum.at(mx[:, a], cid, Q[:, a])
         np.minimum.at(hmin, cid, h[cand])
+        # Clusters eligible to attach: not too many points, not too wide, and not reaching down to the floor.
         small = (counts <= max_points) & (np.max(mx - mn, axis=1) <= max_extent) & (hmin >= min_cluster_floor); small[0] = False
         if not small.any(): break
+        # For each point of an eligible cluster: distance d to the nearest labelled point, and that point's label.
         keep = small[cid]; Qk, ck = Q[keep], cid[keep]
         L = np.flatnonzero(lab > 0); d, i = filters.knn(P[L].astype(np.float64), Qk.astype(np.float64), 1); d = d[:, 0]
         touch = d <= gap; contact = lab[L][i[:, 0]]
         if not touch.any(): break
+        # Count the touching points per (cluster, tree) pair; best[c] = (tree with the most contacts, its share of the
+        # cluster's contacts), i.e. the dominant neighbouring tree and how dominant it is.
         up, pc = np.unique(np.stack([ck[touch], contact[touch]], axis=1), axis=0, return_counts=True)
         tot = np.bincount(up[:, 0], weights=pc, minlength=n + 1); order = np.argsort(-pc); best = {}
         for (c, t), k in zip(up[order], pc[order]):
             if c not in best: best[c] = (int(t), k / tot[c])
+        # Share of each cluster's points within embed_radius of the labelled cloud (only eligible clusters are non-zero).
         embedded = np.bincount(ck, weights=(d <= embed_radius), minlength=n + 1) / np.maximum(counts, 1)
+        # assign[c]: the tree cluster c joins (0 = none); per_tree[t]: tree t's labelled points in this tile.
         per_tree = np.bincount(lab[lab > 0]); assign = np.zeros(n + 1, np.int32)
         for c, (t, dom) in best.items():
             if dom >= dominance and embedded[c] >= min_embedded and counts[c] <= max_share * per_tree[t]: assign[c] = t
@@ -136,50 +178,81 @@ def attach_clusters(P, lab, h, gap, voxel, min_h, max_extent, max_points, passes
 
 
 def ground_height(P, cell=1.0):
-    """Height of each point above the lowest 2 % of its 1 m cell (ground, or the understorey floor)."""
+    """Height of each point above the lowest 2 % of its 1 m cell (ground, or the understorey floor).
+
+    A cheap local floor that needs no DTM, computed per tile; P is (n, 3) in m, `cell` the plan cell size in m.
+    Returns a float64 array (n,) in the order of P.
+    """
+    # Same sort-by-cell-then-z bookkeeping as s05_ground.lowest_points: each cell is a contiguous run, lowest point first.
     ij = np.floor((P[:, :2] - P[:, :2].min(axis=0)) / cell).astype(np.int64); key = ij[:, 0] * 100000 + ij[:, 1]
     order = np.lexsort((P[:, 2], key)); k = key[order]; z = P[order, 2]
     starts = np.r_[0, np.flatnonzero(k[1:] != k[:-1]) + 1]; counts = np.diff(np.r_[starts, len(k)])
+    # z minus the cell's 2nd-percentile z, written back to the points' original positions through `order`.
     out = np.empty(len(P)); out[order] = z - np.repeat(z[starts + (0.02 * counts).astype(np.int64)], counts); return out
 
 
 def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, clusters=True):
+    """Carry the manual tree labels onto the stage-04 merge, tile by tile (see the module docstring for the method).
+
+    Radii in m: r_label, the nearest tree point a merged point must be within to take its id; r_grow, the distance to an
+    already labelled merged point for a growth pass; r_near, the distance to any tree point beyond which no growth
+    happens. grow_passes: number of growth passes; clusters: whether to run attach_clusters.
+    Writes 07_trees/<PLOT>_07_merged_2cm_treeid_tiles/*.laz (the merge tiles with a uint32 treeid, 0 = no tree), the
+    same as one <PLOT>_07_merged_2cm_treeid.laz, <PLOT>_07_trees.csv (per tree), <PLOT>_07_transfer.json (summary), and
+    when the trees had to be moved into the merge frame, <PLOT>_07_tree_points_reframed.npz.
+    """
     from sylva import io, filters
     t0 = time.time(); out = project.stage(site, "07_trees")
     txyz, tids, bounds = load_trees(site); tiles = Tiles(site); reframe = None
     log(f"{site}: {len(bounds)} trees, {len(txyz):,} tree points")
+    # Trees digitised against other registration matrices are first moved into the merge's frame (txyz in place).
+    # The reframed points are saved so they can be inspected without redoing the fit.
     if needs_reframe(site):
         reframe = reframe_trees(site, txyz, tids, bounds, tiles); tiles.cache.clear()
         np.savez(out / f"{site}_07_tree_points_reframed.npz", xyz=txyz, treeid=tids)
         fm = [v["fit_median_cm"] for v in reframe.values() if v.get("fit_median_cm") != ""]
         log(f"{site}: trees moved into the merge frame: fit median {np.median(fm):.1f} cm, worst {max(fm):.1f} cm; not placed: {[t for t, v in reframe.items() if 'note' in v]}")
     tdir = out / f"{site}_07_merged_2cm_treeid_tiles"; tdir.mkdir(exist_ok=True)
+    # Per-tree tallies over all tiles: n_tree, manual tree points scored for fit; hist, their fit histogram (BINS);
+    # n_lab, merged points that end up with the tree's label.
     n_tree = {t: 0 for t in bounds}; hist = {t: np.zeros(len(BINS), np.int64) for t in bounds}; n_lab = {t: 0 for t in bounds}
     n_grown = n_clustered = n_total = 0; outs = []
     for k, t in enumerate(sorted(tiles.cat.tiles, key=lambda t: t.path), 1):
         c = io.read(str(t.path)); P = c.xyz.astype(np.float32); n_total += len(P); b = t.bounds
+        # Tree points in the tile's plan extent plus r_near: enough to label every merged point of the tile.
         m = (txyz[:, 0] >= b[0] - r_near) & (txyz[:, 0] <= b[3] + r_near) & (txyz[:, 1] >= b[1] - r_near) & (txyz[:, 1] <= b[4] + r_near)
-        lab = np.zeros(len(P), np.int32)
+        lab = np.zeros(len(P), np.int32)                # the tile's labels, in the tile's point order (0 = no tree)
         if m.any():
             Q, qi = txyz[m].astype(np.float64), tids[m]
+            # Direct transfer: each merged point's nearest tree point; its id is taken within r_label. `near` marks the
+            # points close enough to the trees to be candidates for growth.
             d, i = filters.knn(Q, P.astype(np.float64), 1); d = d[:, 0]; i = i[:, 0]
             near = d <= r_near; hit = d <= r_label; lab[hit] = qi[i[hit]]
+            # Growth: an unlabelled near point within r_grow of a labelled merged point takes that point's label. Fills
+            # gaps where the 2 cm merge has points the manual tree lacks (just beyond r_label of any tree point).
             for _ in range(grow_passes):
                 L = lab > 0; U = (~L) & near
                 if not U.any() or not L.any(): break
                 d2, i2 = filters.knn(P[L].astype(np.float64), P[U].astype(np.float64), 1); g = d2[:, 0] <= r_grow
                 idx = np.flatnonzero(U)[g]; lab[idx] = lab[L][i2[g, 0]]; n_grown += int(g.sum())
+            # Clusters are found within this tile only, so a cluster cut by a tile edge is judged as two parts.
             if clusters and (lab > 0).any(): n_clustered += attach_clusters(P, lab, ground_height(P), **CLUSTER)
+            # Fit, tree -> merge: distance from each tree point to the nearest merged point, counted only for tree points
+            # inside this tile (half-open bounds), so a point in the r_near margin is not counted in two tiles.
             inside = (Q[:, 0] >= b[0]) & (Q[:, 0] < b[3]) & (Q[:, 1] >= b[1]) & (Q[:, 1] < b[4])   # tree -> cloud fit, no double counting at edges
             if inside.any():
                 dq = filters.knn(P.astype(np.float64), Q[inside], 1)[0][:, 0]; qin = qi[inside]
                 for tid in np.unique(qin):
                     sel = qin == tid; n_tree[int(tid)] += int(sel.sum()); hist[int(tid)] += np.histogram(np.minimum(dq[sel], 0.1), bins=np.r_[BINS, 1.0])[0]
         for tid, cnt in zip(*np.unique(lab[lab > 0], return_counts=True)): n_lab[int(tid)] += int(cnt)
+        # The tile is written with every original field plus treeid, in its original point order (segfix relies on it).
         p = tdir / Path(t.path).name; io.write(c.with_attrs(treeid=lab.astype(np.uint32)), str(p)); outs.append(str(p))
         if k % 10 == 0 or k == len(tiles.cat.tiles): log(f"{site}: tile {k}/{len(tiles.cat.tiles)}: labelled {sum(n_lab.values()):,} of {n_total:,}")
     io.write_concat(outs, str(out / f"{site}_07_merged_2cm_treeid.laz"))
+    # Median fit (cm) from a histogram: the lower edge of the bin holding the middle point; NaN for a tree with no points.
     def median_fit(h): return float(BINS[min(int(np.searchsorted(np.cumsum(h), h.sum() / 2)), len(BINS) - 1)]) * 100 if h.sum() else float("nan")
+    # Per-tree table: points labelled in the merge, tree points scored, share of them within 5 cm (bins 0-9), median
+    # fit, and the reframing record where the tree was moved.
     with open(out / f"{site}_07_trees.csv", "w", newline="") as f:
         w = csv.writer(f); w.writerow(["treeid", "n_points_new_cloud", "n_tree_points", "within_5cm_frac", "median_fit_cm", "block_scan", "block_shift_cm", "reframe_fit_median_cm", "reframe_within_5cm"])
         for tid in sorted(bounds):
@@ -194,11 +267,21 @@ def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, cluste
                "settings": {"r_label": r_label, "r_grow": r_grow, "r_near": r_near, "grow_passes": grow_passes, "clusters": clusters, **{"cluster_" + k: v for k, v in CLUSTER.items()}},
                "frame": f"{project.matrices_dir(site).name}" + (f"; each tree moved from {project.trees_frame_dir(site).name} by its best-fitting block motion" if reframe else ""),
                "source": str(project.setting_path(site, "manual_trees")), "seconds": round(time.time() - t0)}
+    # The transfer record is written last; done() checks for it.
     project.jsave(summary, out / f"{site}_07_transfer.json"); project.record_run(site, "07_transfer", labelled=summary["labelled_points"], trees=len(bounds))
     log(f"{site}: {summary['labelled_points']:,} of {n_total:,} points labelled ({n_grown:,} grown, {n_clustered:,} as clusters); median fit {summary['median_fit_cm']:.1f} cm")
 
 
 def review(site):
+    """Rank the trees by how much unlabelled canopy lies inside their crown envelope: where to start editing in segfix.
+
+    Reads the current labels (project.tree_tiles: the segfix-edited tiles once imported, else the transfer's; treeid > 0
+    tree, 0 unassigned, -1 noise). Two passes over the tiles: the first collects each tree's points (thinned to 10 cm)
+    to build its envelope, the plan convex hull of its points above 30 % of its height range, between that level and its
+    top; the second counts the unlabelled points more than 1 m above the local floor inside each envelope.
+    Writes 07_trees/<PLOT>_07_review.csv (most unlabelled points first) and <PLOT>_07_review_top3.png (side and plan
+    views of the three worst trees).
+    """
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
     from matplotlib.path import Path as MplPath
     from scipy.spatial import ConvexHull
@@ -209,37 +292,47 @@ def review(site):
     for t in tiles:
         c = io.read(str(t.path)); lab = c.attrs["treeid"].astype(np.int64); m = lab > 0
         if not m.any(): continue
+        # One point per (10 cm voxel, tree): np.unique over voxel index and label, keeping the first of each.
         xyz = c.xyz[m]; lb = lab[m]; _, first = np.unique(np.c_[np.floor(xyz / 0.1).astype(np.int64), lb], axis=0, return_index=True)
         for tid in np.unique(lb[first]): pts.setdefault(int(tid), []).append(xyz[first][lb[first] == tid])
+    # hulls[tid] = (plan hull path, plan bbox min, plan bbox max, crown base z, top z). The bbox is a fast pre-test before
+    # the point-in-polygon test. Trees with too few crown points or a degenerate hull (e.g. collinear) are skipped.
     hulls = {}
     for tid, parts in pts.items():
         P = np.concatenate(parts); z0, z1 = P[:, 2].min(), P[:, 2].max(); crown = P[P[:, 2] >= z0 + 0.3 * (z1 - z0)]
         if len(crown) < 10: continue
         try: h = ConvexHull(crown[:, :2]); hulls[tid] = (MplPath(crown[h.vertices, :2]), crown[:, :2].min(axis=0), crown[:, :2].max(axis=0), z0 + 0.3 * (z1 - z0), z1)
         except Exception: continue
+    # inside[tid]: unlabelled canopy points in the envelope; labelled[tid]: the tree's own points (all, not thinned);
+    # sample[tid]: every 5th of the unlabelled points in the envelope, for the figure.
     inside = {t: 0 for t in hulls}; labelled = {t: 0 for t in hulls}; sample = {}    # pass 2: unlabelled canopy inside each envelope
     for t in tiles:
         c = io.read(str(t.path)); lab = c.attrs["treeid"].astype(np.int64); P = c.xyz; h = ground_height(P)
         for tid, cnt in zip(*np.unique(lab[lab > 0], return_counts=True)):
             if int(tid) in labelled: labelled[int(tid)] += int(cnt)
+        # Unassigned points (0; noise, -1, is left out) more than 1 m above the local floor, so ground and low
+        # understorey under a crown do not count.
         Pu = P[(lab == 0) & (h > 1.0)]; b = t.bounds
         for tid, (path, lo, hi, zlo, zhi) in hulls.items():
-            if hi[0] < b[0] or lo[0] > b[3] or hi[1] < b[1] or lo[1] > b[4]: continue
+            if hi[0] < b[0] or lo[0] > b[3] or hi[1] < b[1] or lo[1] > b[4]: continue   # envelope does not reach this tile
             m = (Pu[:, 0] >= lo[0]) & (Pu[:, 0] <= hi[0]) & (Pu[:, 1] >= lo[1]) & (Pu[:, 1] <= hi[1]) & (Pu[:, 2] >= zlo) & (Pu[:, 2] <= zhi)
             if not m.any(): continue
             k = path.contains_points(Pu[m][:, :2]); inside[tid] += int(k.sum())
             if k.any(): sample.setdefault(tid, []).append(Pu[m][k][::5])
+    # Most unlabelled canopy first (ties broken by labelled points, then id). ratio: unlabelled in the envelope per own point.
     rows = sorted(((inside[t], labelled[t], t) for t in hulls), reverse=True)
     with open(d / f"{site}_07_review.csv", "w", newline="") as f:
         w = csv.writer(f); w.writerow(["treeid", "unlabelled_canopy_in_envelope", "labelled_points", "ratio", "crown_base_z", "top_z"])
         for u, l, t in rows: w.writerow([t, u, l, f"{u / max(l, 1):.3f}", f"{hulls[t][3]:.2f}", f"{hulls[t][4]:.2f}"])
     log(f"{site}: {len(hulls)} trees reviewed; over 20 % of their own points unlabelled in the envelope: {sum(1 for u, l, t in rows if u > 0.2 * max(l, 1))}")
+    # Figure: the (up to) three worst trees, side view (x, z) above and plan view (x, y) below; the tree's own points
+    # (10 cm thinned) in green, the unlabelled points in its envelope in orange.
     top = [t for u, l, t in rows[:3] if u > 0]
     if top:
         fig, axes = plt.subplots(2, len(top), figsize=(6 * len(top), 11), layout="constrained", squeeze=False)
         for k, tid in enumerate(top):
             L = np.concatenate(pts[tid]); U = np.concatenate(sample[tid])
-            for row, (i, j, name) in enumerate(((0, 2, "side"), (0, 1, "plan"))):
+            for row, (i, j, name) in enumerate(((0, 2, "side"), (0, 1, "plan"))):   # (horizontal axis, vertical axis) columns of xyz
                 ax = axes[row, k]; ax.scatter(L[:, i], L[:, j], s=0.6, c="#009E73", rasterized=True, label=f"tree {tid}")
                 ax.scatter(U[:, i], U[:, j], s=0.8, c="#D55E00", rasterized=True, label="unlabelled in its envelope"); ax.set_aspect("equal"); ax.set_title(f"tree {tid}: {name}", fontsize=10)
                 if row == 0 and k == 0: ax.legend(markerscale=10, fontsize=8)
@@ -248,12 +341,18 @@ def review(site):
 
 
 def run(site, review_only=False, **kw):
+    """Stage 07 for one plot: the transfer (unless review_only) and then the review. kw are transfer()'s settings.
+
+    Plots without manual trees are skipped. With review_only, the review is redone on the current labels (e.g. after a
+    segfix import) without touching the transferred ones.
+    """
     if not project.has_trees(site): log(f"{site}: no manual trees; nothing to transfer"); return
     if not review_only: transfer(site, **kw)
     review(site)
 
 
 def done(site):
+    """Whether stage 07 has completed for the plot (transfer record and review list exist); always true without manual trees."""
     return not project.has_trees(site) or ((ROOT / site / "07_trees" / f"{site}_07_transfer.json").exists() and (ROOT / site / "07_trees" / f"{site}_07_review.csv").exists())
 
 

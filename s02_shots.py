@@ -1,4 +1,4 @@
-"""Stage 02 pulses: every pulse of every registered scan, unfiltered, for the canopy stages (09 voxels, 10 gap profiles).
+"""Stage 02 pulses: every pulse of every registered scan, unfiltered, for the canopy stages (10 voxels, 11 gap profiles).
 
 usage: s02_shots.py [PLOT ...] [--workers=4] [--dry-run]
 
@@ -21,17 +21,26 @@ import numpy as np
 import project
 from project import ROOT, log
 
-MIN_RANGE = 0.5
-STAMP = re.compile(r"\d{6}_\d{6}")
+MIN_RANGE = 0.5                                               # m: echoes closer than this are from the scanner head, not the scene
+STAMP = re.compile(r"\d{6}_\d{6}")                            # the YYMMDD_HHMMSS time stamp RIEGL puts in scan file names
 
 
+# The stage-02 shots file of one scan: 02_shots/<PLOT>_02_<scan>_shots.parquet (sylva shots format, scanner frame).
 def shots_file(site, name): return ROOT / site / "02_shots" / f"{site}_02_{name}_shots.parquet"
 
 
 def jobs_for(site):
-    """(site, name, rxp path, theta limits) per registered scan of 03_transforms.json, and the scans that could not be matched."""
+    """(site, name, rxp path, theta limits) per registered scan of 03_transforms.json, and the scans that could not be matched.
+
+    The scan list comes from stage 03 so that the pulses use the same scan names (and thus matrices) as the point clouds.
+    A scan name <position> or <position>#k is matched to its position, then to the position's .rxp whose stem equals the
+    time stamp in the stage-01 source file name; a position with a single .rxp needs no stamp for its first scan. The theta
+    limits are the zenith range of the scan pattern in degrees, (start, start + step x count), used to rebuild the misses.
+    Returns (jobs, [(name, reason)] of scans that were not matched).
+    """
     proj = project.riscan_project(site)
     if proj is None: raise FileNotFoundError(f"{site}: no RiSCAN project folder in 00_raw (unzip it first)")
+    # positions that have both an .rxp and a scan pattern (the pattern is needed for fill_missing); a SOP is not needed
     pos = {p.name: p for p in proj.with_scans(require_sop=False) if p.rxp is not None and p.pattern is not None}
     tj = json.load(open(ROOT / site / "03_registration" / f"{site}_03_transforms.json"))
     jobs, bad = [], []
@@ -41,6 +50,7 @@ def jobs_for(site):
         if p is None: bad.append((name, "no position with an rxp")); continue
         m = STAMP.search(Path(x.get("source", "")).name)
         f = next((s for s in p.scans if m and Path(s.name).stem == m.group(0)), None) if m else None
+        # fallback without a matching stamp: the position's only .rxp, and only for its first scan
         if f is None and len(p.scans) == 1 and "#" not in name: f = p.scans[0]
         if f is None: bad.append((name, f"no rxp for {Path(x.get('source', '')).name} among {[s.name for s in p.scans]}")); continue
         lim = (p.pattern["theta_start"], p.pattern["theta_start"] + p.pattern["theta_delta"] * p.pattern["theta_count"])
@@ -49,18 +59,31 @@ def jobs_for(site):
 
 
 def convert_one(args):
+    """Read one .rxp as pulses, rebuild the misses, drop the echoes under MIN_RANGE and save a shots file (scanner frame).
+
+    args: (site, scan name, .rxp path, theta limits in degrees). Runs in a worker process. Returns (scan name, manifest
+    record of counts, size and seconds), or (scan name, {"error": last traceback line}). Written as <name>.part.parquet
+    and renamed when complete.
+    """
     site, name, rxp, lim = args
     from sylva import io, Shots
     pq = shots_file(site, name); tmp = pq.with_name(pq.stem + ".part.parquet")
     try:
         t0 = time.time()
+        # every echo, head echoes included (min_range 0), so they can be counted for the manifest and their pulses dropped
+        # below rather than mistaken for misses; plus the misses rebuilt over the pattern's zenith range (rep counts them)
         shots, rep = io.read_rxp_shots(rxp, fill_missing=lim, return_report=True, min_range=0.0)
         n_pulses, n_echoes, n_miss = shots.n_shots, shots.n_echoes, int((shots.echo_count == 0).sum())
-        keep = shots.echo_range >= MIN_RANGE
+        keep = shots.echo_range >= MIN_RANGE                                         # per echo
+        # cnt: kept echoes per pulse (so = the pulse each echo belongs to)
         so = shots.shot_of_echo(); cnt = np.bincount(so[keep], minlength=n_pulses); del so
         drop = (shots.echo_count > 0) & (cnt == 0); ks = ~drop                      # pulses whose only echoes were at the scanner head
+        # a pulse that only hit the head is dropped, not made a miss: it says nothing about the scene beyond 0.5 m.
+        # New CSR layout over the kept pulses: echo_count = kept echoes, echo_start = running sum. The kept echoes stay in
+        # pulse order, so echo_range[keep] lines up with it.
         count = cnt[ks]; start = np.r_[0, np.cumsum(count)[:-1]]
         ea = {k: shots.echo_attrs[k][keep] for k in ("reflectance", "amplitude", "deviation") if k in shots.echo_attrs}
+        # every pulse starts at the scanner origin (0, 0, 0): the file stays in the scanner frame, the matrix is applied later
         f = Shots(origin=np.broadcast_to(np.zeros(3), (int(ks.sum()), 3)), direction=shots.direction[ks], echo_start=start,
                   echo_count=count, echo_range=shots.echo_range[keep], echo_attrs=ea)
         del shots
@@ -76,6 +99,11 @@ def convert_one(args):
 
 
 def run(site, workers=4, dry=False):
+    """Write the shots file of every matched scan still to do, in parallel, and 02_shots/<PLOT>_02_shots_manifest.json.
+
+    workers: processes (a dense scan can take over 12 GB each). dry: only match the scans and return (jobs, unmatched).
+    The manifest is saved after every scan, so an interrupted run resumes. Raises RuntimeError if any scan failed.
+    """
     jobs, bad = jobs_for(site)
     log(f"{site}: {len(jobs)} scans matched to an rxp, {len(bad)} not: {bad[:5]}")
     if dry: return jobs, bad
@@ -83,6 +111,7 @@ def run(site, workers=4, dry=False):
     man = project.jload(mf) or {"site": site, "frame": "scanner coordinates (SOCS); the matrices are in 03_registration",
                              "filter": f"none: every echo at range >= {MIN_RANGE} m", "scans": {}}
     man["unmatched"] = bad
+    # resumability: redo a scan that has no record, a failed one, or whose parquet is missing
     todo = [j for j in jobs if "error" in man["scans"].get(j[1], {"error": 1}) or not shots_file(site, j[1]).exists()]
     log(f"{site}: {len(todo)} scans to convert"); t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -91,6 +120,7 @@ def run(site, workers=4, dry=False):
             if "error" in res: log(f"{site}: {name}: ERROR {res['error'][:120]}")
             elif k % 10 == 0 or k == len(todo):
                 log(f"{site}: {k}/{len(todo)} {name}: {res['pulses_written']:,} pulses, {res['echoes_written']:,} echoes ({(time.time() - t0) / 60:.0f} min)")
+    # totals over every scan in the manifest, including those of earlier runs
     ok = [v for v in man["scans"].values() if "error" not in v]
     man["totals"] = {"scans": len(ok), "pulses_written": sum(v["pulses_written"] for v in ok), "echoes_written": sum(v["echoes_written"] for v in ok),
                      "misses": sum(v["misses_reconstructed"] for v in ok), "gb": round(sum(v["parquet_mb"] for v in ok) / 1000, 1),
@@ -100,6 +130,7 @@ def run(site, workers=4, dry=False):
 
 
 def done(site):
+    """Whether stage 02 is complete: the manifest has totals and no failed scan (unmatched scans do not count as failures)."""
     t = (project.jload(ROOT / site / "02_shots" / f"{site}_02_shots_manifest.json") or {}).get("totals")
     return bool(t) and t.get("errors", 1) == 0
 
