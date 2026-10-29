@@ -59,16 +59,21 @@ The transferred tree labels are a starting point; the edited ones are what stage
 
 1. `run.py PLOT` (or `s07_segfix.py prepare PLOT`) writes a segfix project, `07_trees/<PLOT>_07_segfix/`: every
    labelled point and the unlabelled points within 15 m of the plot box, all fields kept, with a signed `treeID`
-   (> 0 tree, 0 unassigned, -1 noise). It is added to segfix's recent projects; `run.py` stops there for that plot.
+   (> 0 tree, 0 unassigned, -1 noise), and a leaf/wood class field `leafwood` (0 unclassified, 1 leaf, 2 wood) filled
+   from the per-tree classification of stage 09 where it has run. It is added to segfix's recent projects, opens with
+   `leafwood` as its point-class field, and `run.py` stops there for that plot. A project prepared before the class
+   field existed gets it with `s07_segfix.py add-classes PLOT` (tree edits and the Done list are kept; close segfix first).
 2. Open it in `segfix` and work through the trees, starting with the top of `07_trees/<PLOT>_07_review.csv` (the trees
    with the most unlabelled canopy inside their crown). `Space` marks a tree done; `Ctrl+S` saves. Segfix offers to
-   downsample dense plots for the session; saving still labels every point.
+   downsample dense plots for the session; saving still labels every point. Leaf and wood are corrected in the same
+   pass: `Shift+F` colours by class, `Ctrl+1`...`Ctrl+3` give the selection (or the whole tree) a class.
 3. `s07_segfix.py status PLOT` shows how many trees are done and how much has changed.
 4. `s07_segfix.py import PLOT` writes the edited labels as `07_trees/<PLOT>_07_trees_edited_tiles/` and
-   `<PLOT>_07_segfix_import.json` (trees added, removed and changed). It refuses while trees are not marked done
+   `<PLOT>_07_segfix_import.json` (trees added, removed and changed, points reclassified). It refuses while trees are not marked done
    (`--allow-unfinished` overrides).
-5. `run.py PLOT` again: the review is redone on the edited labels, stage 08 redoes only the trees whose points changed
-   (and drops removed trees), and the plot totals are redone.
+5. `run.py PLOT` again: the review is redone on the edited labels, stage 08 redoes the models of trees whose points
+   changed and the leaf/wood split, leaf metrics and sylva QSM of trees whose classes changed (points classed by hand
+   keep their class; the classifier fills in only the unclassified ones), drops removed trees, and redoes the plot totals.
 
 Plots without manual trees have no labels to start from: segment them first (for example `sylva trees --segment` on a
 height-normalised cloud) and open that file in segfix.

@@ -13,7 +13,9 @@ the scanner it came from (point_source_id -> scan position in the merge's matric
   <PLOT>_08_rct_trees.csv, <PLOT>_08_sylva_trees.csv, 09_leafwood/<PLOT>_09_leafwood.csv, 08_qsm/<PLOT>_08_models_manifest.json
   08_qsm/<PLOT>_08_plot_rct_mesh.ply, _plot_sylva_mesh.ply, _plot_ground_mesh.ply   all trees of each tool, a tree the same colour in both
 Resumable: a tree is redone only when its points changed (count and coordinate checksum) or a step is missing; trees
-removed in segfix lose their outputs. Leaf/wood: sylva.leaves.classify_leaf_wood (graph-based, Tian & Li 2022).
+removed in segfix lose their outputs. Leaf/wood: sylva.leaves.classify_leaf_wood (graph-based, Tian & Li 2022); where the
+segfix edit carries leaf/wood classes (leafwood field), points classed by hand keep their class and the classifier fills
+in the unclassified ones; a tree whose classes changed has its leaf/wood, leaf metrics and sylva QSM redone.
 """
 import colorsys, csv, json, re, subprocess, time, traceback
 from concurrent.futures import ProcessPoolExecutor
@@ -45,22 +47,39 @@ def write_ground_mesh(dtm, path):
 
 
 def collect_trees(site, only=None):
-    """{tree id: (xyz float32, scan index)} of every labelled point."""
+    """{tree id: (xyz float32, scan index, leaf/wood class or None)} of every labelled point. The class (0 unclassified,
+    1 leaf, 2 wood) is the leafwood field the segfix edit carries, where the tiles have it."""
     from sylva import io
-    xs, ids, ps = [], [], []
+    xs, ids, ps, cs = [], [], [], []
     for t in project.tree_tiles(site):
         c = io.read(t); lab = c.attrs["treeid"].astype(np.int64); m = lab > 0
         if only: m &= np.isin(lab, list(only))
-        if m.any(): xs.append(c.xyz[m].astype(np.float32)); ids.append(lab[m]); ps.append(c.attrs["point_source_id"][m].astype(np.int32))
-    xyz = np.concatenate(xs); tid = np.concatenate(ids); psid = np.concatenate(ps); order = np.argsort(tid, kind="stable")
-    xyz, tid, psid = xyz[order], tid[order], psid[order]
+        if m.any():
+            xs.append(c.xyz[m].astype(np.float32)); ids.append(lab[m]); ps.append(c.attrs["point_source_id"][m].astype(np.int32))
+            cs.append(c.attrs["leafwood"][m].astype(np.uint8) if "leafwood" in c.attrs else None)
+    has_cls = all(x is not None for x in cs)
+    xyz = np.concatenate(xs); tid = np.concatenate(ids); psid = np.concatenate(ps); cls = np.concatenate(cs) if has_cls else None
+    order = np.argsort(tid, kind="stable"); xyz, tid, psid = xyz[order], tid[order], psid[order]
+    if has_cls: cls = cls[order]
     starts = np.r_[0, np.flatnonzero(tid[1:] != tid[:-1]) + 1]; ends = np.r_[starts[1:], len(tid)]
-    return {int(tid[s]): (xyz[s:e], psid[s:e]) for s, e in zip(starts, ends)}
+    return {int(tid[s]): (xyz[s:e], psid[s:e], cls[s:e] if has_cls else None) for s, e in zip(starts, ends)}
 
 
 def signature(xyz):
     """Point count and a coordinate checksum (mm), order-independent: a tree is redone when this changes."""
     return f"{len(xyz)}:{int(np.round(xyz.astype(np.float64) * 1000).sum()) & 0xFFFFFFFFFFFF:x}"
+
+
+def class_signature(xyz, cls):
+    """Wood, leaf and unclassified counts and a checksum of the wood points (mm): stage 09 is redone when this changes."""
+    w = cls == 2
+    return f"{int(w.sum())}:{int((cls == 1).sum())}:{int((cls == 0).sum())}:{int(np.round(xyz[w].astype(np.float64) * 1000).sum()) & 0xFFFFFFFFFFFF:x}"
+
+
+def class_signature_of_file(path):
+    """class_signature of a stage-09 tree file (its wood field as classes 2 and 1)."""
+    import laspy
+    las = laspy.read(str(path)); return class_signature(np.column_stack([las.x, las.y, las.z]), np.where(np.asarray(las["wood"]) > 0, 2, 1))
 
 
 def parse_rct_trees(path):
@@ -94,7 +113,7 @@ def stem_prior(xyz, h, wood, stems):
 
 
 def one_tree(args):
-    site, tid, xyz, psid, origins, dtm_d, do_rct, do_sylva, stems = args
+    site, tid, xyz, psid, cls, origins, dtm_d, do_rct, do_sylva, stems = args
     from sylva import PointCloud, Raster, filters, io, leaves, qsm
     t0 = time.time(); res = {"treeid": tid, "n_points": int(len(xyz)), "signature": signature(xyz)}
     rct_dir = ROOT / site / "08_qsm" / f"{site}_08_rct"; syl_dir = ROOT / site / "08_qsm" / f"{site}_08_sylva"; lw_dir = ROOT / site / "09_leafwood"
@@ -115,6 +134,9 @@ def one_tree(args):
             if s and s["rct_base_diameter_m"] > 0.06 * H: res["rct_flag"] = "trunk diameter over 6 % of height: multi-stem clump, model unreliable"
         if do_sylva:
             t1 = time.time(); cloud = PointCloud(xyz.astype(np.float64)); wood = leaves.classify_leaf_wood(cloud, voxel_size=0.02, method="gbs")
+            if cls is not None:                                    # classes set by hand in segfix win; only unclassified points keep the classifier's
+                wood[cls == 2] = True; wood[cls == 1] = False
+                res.update(class_signature=class_signature(xyz, cls), points_classed_by_hand=int((cls > 0).sum()))
             io.write(cloud.with_attrs(wood=wood.astype(np.uint8), height=h, treeid=np.full(len(cloud), tid, np.uint32), point_source_id=psid.astype(np.uint16)),
                      str(lw_dir / f"{site}_09_tree_{tid}.laz"))
             res.update(n_wood=int(wood.sum()), n_leaf=int((~wood).sum()), wood_fraction=float(wood.mean()))
@@ -169,10 +191,17 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
     def same(t):
         r = man["trees"].get(str(t), {}); return r.get("signature", f"{r.get('n_points')}") in (signature(trees[t][0]), str(len(trees[t][0])))
     def rct_ok(t): return same(t) and "rct_volume_m3" in man["trees"].get(str(t), {}) and (rct_dir / f"{site}_08_tree_{t}_trees.txt").exists()
-    def sylva_ok(t): return same(t) and (lw / f"{site}_09_tree_{t}.laz").exists() and ("sylva_dbh_m" in man["trees"][str(t)] or "sylva_note" in man["trees"][str(t)])
+    def classes_same(t):
+        """No class edits since stage 09 ran: the tree's classes match the recorded ones (or, before any were recorded, the 09 file)."""
+        cls = trees[t][2]; r = man["trees"].get(str(t), {})
+        if cls is None: return True
+        if "class_signature" not in r and (lw / f"{site}_09_tree_{t}.laz").exists(): r["class_signature"] = class_signature_of_file(lw / f"{site}_09_tree_{t}.laz")
+        return r.get("class_signature") == class_signature(trees[t][0], cls)
+    def sylva_ok(t): return (same(t) and classes_same(t) and (lw / f"{site}_09_tree_{t}.laz").exists()
+                             and ("sylva_dbh_m" in man["trees"][str(t)] or "sylva_note" in man["trees"][str(t)]))
     todo = [t for t in sorted(trees) if (do_rct and not rct_ok(t)) or (do_sylva and not sylva_ok(t))][:limit]
     log(f"{site}: {len(trees)} trees ({labels}), {sum(len(v[0]) for v in trees.values()):,} points; {len(todo)} to do on {workers} workers")
-    jobs = [(site, t, trees[t][0], trees[t][1], origins, dtm_d, do_rct and not rct_ok(t), do_sylva and not sylva_ok(t), stems) for t in todo]
+    jobs = [(site, t, *trees[t], origins, dtm_d, do_rct and not rct_ok(t), do_sylva and not sylva_ok(t), stems) for t in todo]
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for k, r in enumerate(pool.map(one_tree, jobs, chunksize=1), 1):
             old = man["trees"].get(str(r["treeid"]), {})
