@@ -18,7 +18,7 @@ segfix edit carries leaf/wood classes (leafwood field), points classed by hand k
 in the unclassified ones; a tree whose classes changed has its leaf/wood, leaf metrics and sylva QSM redone.
 All coordinates are in the project frame of the merge (stage 04); heights are above the 1 m DTM of stage 05.
 """
-import colorsys, csv, hashlib, json, re, subprocess, time, traceback
+import colorsys, csv, json, re, subprocess, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -258,7 +258,7 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
     origins, src = scan_origins(site); dtm = project.load_dtm(site)
     # the DTM's signature: a tree's models are redone when the DTM they were made with (rct_dtm, leafwood_dtm in its record;
     # for records older than those keys, the manifest's dtm_signature, else the current DTM) is not the current one
-    dsig = hashlib.sha1(np.ascontiguousarray(dtm.data).tobytes()).hexdigest()[:16]
+    dsig = project.dtm_signature(site)
     dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution, "signature": dsig}
     nv, nf = write_ground_mesh(dtm, rct_dir / "ground_mesh.ply")
     trees = collect_trees(site, only); labels = "segfix edit" if project.edited_tiles_dir(site).exists() else "transfer"

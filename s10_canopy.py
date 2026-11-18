@@ -39,8 +39,9 @@ def run(site, voxel=0.5, buffer=20.0, workers=8, keep_shots=False):
     from sylva import Shots, canopy, voxels
     t0 = time.time(); out10 = project.stage(site, "10_voxels"); out11 = project.stage(site, "11_canopy")
     mf = out10 / f"{site}_10_11_manifest.json"
-    # traced already and only the plot box changed: the voxel profile is redone over the new box without tracing again
-    if mf.exists() and (out10 / f"{site}_10_voxels_{voxel:g}m").exists() and not done(site):
+    # traced already with the current DTM and only the plot box changed: the voxel profile is redone over the new box
+    # without tracing again
+    if mf.exists() and (out10 / f"{site}_10_voxels_{voxel:g}m").exists() and same_dtm(site) and not done(site):
         log(f"{site}: the plot box changed; redoing the voxel profile"); reprofile(site, voxel); return
     # scans used: those with both a matrix (project frame) and a stage-02 shots file; the rest are recorded in the manifest
     M, msrc = project.matrices(site)
@@ -98,7 +99,7 @@ def run(site, voxel=0.5, buffer=20.0, workers=8, keep_shots=False):
     t2 = time.time(); xy = project.plot_box(site)
     pai_vox = write_profile(site, voxel, voxel_profile(g, voxel, hi[2] - lo[2], xy), rep, scal)
     # the manifest, written last: its presence marks the plot as done (see done())
-    rec = {"site": site, "run": f"{time.strftime('%Y-%m-%d')} from 02_shots", "shots": "02_shots", "matrices": msrc, "scans": names, "upright_scans": upright,
+    rec = {"site": site, "run": f"{time.strftime('%Y-%m-%d')} from 02_shots", "shots": "02_shots", "dtm_signature": project.dtm_signature(site), "matrices": msrc, "scans": names, "upright_scans": upright,
            "matrices_without_shots": sorted(set(M) - set(have)), "shots_without_matrix": sorted(allshots - set(M)), "pulses": n_shots, "echoes": n_echoes,
            "voxel": {"size_m": voxel, "bounds": [lo, hi], "dtm": "05_ground dtm_1m, nearest-filled", "ground_distance_m": 0.2, "occlusion": True, "attenuation": "fpl",
                      "lad": "spherical", "beam": None, "min_beams_profile": MIN_BEAMS, "block_stats": dict(g.block_stats), "pai_voxel": pai_vox,
@@ -177,11 +178,17 @@ def reprofile(site, voxel=0.5, **_):
     rec["voxel"]["profile_region"] = {"plot_bounds": xy.round(3).tolist(), "note": "voxel profile and PAI over voxels inside the plot box"}; project.jsave(rec, mf)
 
 
+def same_dtm(site):
+    """Whether the voxels were traced with the current DTM (manifests older than the dtm_signature key count as current)."""
+    rec = project.jload(ROOT / site / "10_voxels" / f"{site}_10_11_manifest.json") or {}
+    return rec.get("dtm_signature", project.dtm_signature(site)) == project.dtm_signature(site)
+
+
 def done(site):
-    """Whether stages 10 and 11 are finished for the plot: the manifest, written last, exists and its voxel profile is over
-    the current plot box (after the box changes, run() redoes just the profile)."""
+    """Whether stages 10 and 11 are finished for the plot: the manifest, written last, exists, was made with the current
+    DTM, and its voxel profile is over the current plot box (after the box changes, run() redoes just the profile)."""
     rec = project.jload(ROOT / site / "10_voxels" / f"{site}_10_11_manifest.json")
-    return bool(rec) and project.same_bounds(rec["voxel"].get("profile_region", {}).get("plot_bounds"), site)
+    return bool(rec) and same_dtm(site) and project.same_bounds(rec["voxel"].get("profile_region", {}).get("plot_bounds"), site)
 
 
 if __name__ == "__main__":

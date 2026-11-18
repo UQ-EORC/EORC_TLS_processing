@@ -338,6 +338,12 @@ def box_area_ha(corners):
     c = _corners(corners); return float(abs(np.dot(c[:, 0], np.roll(c[:, 1], -1)) - np.dot(c[:, 1], np.roll(c[:, 0], -1))) / 2 / 1e4)
 
 
+def dtm_signature(plot):
+    """A short checksum of the plot's 1 m DTM, recorded by the stages that use it so they notice when stage 05 redid it."""
+    import hashlib
+    return hashlib.sha1(np.ascontiguousarray(load_dtm(plot).data).tobytes()).hexdigest()[:16]
+
+
 def same_bounds(stored, plot):
     """Whether a plot box stored in a record (corners, a dict with corners or xmin..ymax, or a 4-sequence) is the plot's
     current one (to 1 mm)."""
