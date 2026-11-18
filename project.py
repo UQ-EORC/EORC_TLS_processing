@@ -57,6 +57,9 @@ DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter":
             "segment_trees": True, "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
             "inventory_x": "x", "inventory_y": "y", "code": None, "name": None,
             "scan_grid_rings": None,      # scan positions on a regular grid: plot box along the grid, this many outer rings left out
+            # stage-07 automatic segmentation: farthest (m, horizontal) a tree's labels reach from its stem, the widest crown
+            # radius the stand can have; what lies farther from every stem stays unlabelled (sylva's max_reach)
+            "max_reach": 15.0,
             # stage-05 ground filter: method "pmf" (sylva.ground.classify_ground_pmf) or "csf" (classify_ground_csf), and its keywords
             "ground": {"method": "pmf", "cell_size": 2.0, "max_window": 40.0}}
 DEFAULTS.update(CONFIG.get("defaults", {}))

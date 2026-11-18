@@ -284,7 +284,7 @@ def transfer(site, r_label=0.05, r_grow=0.04, r_near=0.15, grow_passes=2, cluste
 
 # Automatic segmentation settings. margin: metres around the plot box segmented too, so trees leaning in or out of the box
 # are whole; buffer: the band of neighbouring tiles each tile is segmented with (wider than the largest crown; sylva widens
-# it up to max_buffer where crowns reach its edge); min_height: candidates lower than this are dropped (sylva's default);
+# it up to max_buffer where crowns reach its edge, and no further than twice the plot's max_reach plus 2 m); min_height: candidates lower than this are dropped (sylva's default);
 # piece: side (m) of the pieces the merge tiles are cut into first, small enough that a densely scanned one (tens of
 # thousands of points per m2 near the scanner) and its neighbours fit in memory, and sylva's estimate of what a piece
 # and its buffer hold (whole files) close; voxels: the graph voxel sizes (m) tried in turn, the next one only when the
@@ -314,7 +314,10 @@ def segment(site, margin, buffer, max_buffer, min_height, piece, voxels, workers
     sylva's tiled segmentation (sylva.als.tiles.segment_trees) on the merge tiles that touch the plot box plus margin,
     height-normalised with the stage-05 DTM: stem candidates that are branches of another are merged, each stem grows
     into its tree by least-cost paths through a 3 cm graph of the points, heights are measured and candidates under
-    min_height or duplicated are dropped (prune). It gives the labels the whole-plot sequence would, tile by tile. The
+    min_height or duplicated are dropped (prune). No tree reaches farther than max_reach (project setting) from its
+    stem: without that limit a tree takes all the vegetation joined to it (shrubs with no stem of their own, the scan past
+    the seeded area), and the tiles are read again with ever wider buffers for crowns no tree has. Only the points within
+    max_reach of the seeded area are segmented. It gives the labels the whole-plot sequence would, tile by tile. The
     merge tiles are first cut into pieces of side piece, each with its height above the DTM (only coordinates and
     height are kept), since sylva holds a tile with its neighbours in memory and a merge tile can hold 200 M points. Only
     stems within the box plus margin seed trees. Every point then has a tree id or none (sylva's -1, written 0 here: -1
@@ -328,17 +331,22 @@ def segment(site, margin, buffer, max_buffer, min_height, piece, voxels, workers
     from sylva.pointcloud import PointCloud
     t0 = time.time(); out = project.stage(site, "07_trees")
     x0, y0, x1, y1 = project.plot_bounds(site); lo = (x0 - margin, y0 - margin); hi = (x1 + margin, y1 + margin)
+    # the points any seeded stem can reach: the seeded area grown by the reach; nothing beyond it can be labelled
+    reach = float(project.setting(site, "max_reach"))
+    alo = (lo[0] - reach, lo[1] - reach); ahi = (hi[0] + reach, hi[1] + reach)
+    inside = lambda c: (c.xyz[:, 0] >= alo[0]) & (c.xyz[:, 0] <= ahi[0]) & (c.xyz[:, 1] >= alo[1]) & (c.xyz[:, 1] <= ahi[1])
     every = sorted(Tiles(site).cat.tiles, key=lambda t: t.path)
-    use = [t for t in every if not (t.bounds[3] < lo[0] or t.bounds[0] > hi[0] or t.bounds[4] < lo[1] or t.bounds[1] > hi[1])]
+    use = [t for t in every if not (t.bounds[3] < alo[0] or t.bounds[0] > ahi[0] or t.bounds[4] < alo[1] or t.bounds[1] > ahi[1])]
     stems = [s for s in read_stems(site) if lo[0] <= s.x <= hi[0] and lo[1] <= s.y <= hi[1]]
     tmp = project.SCRATCH / "segment" / site
     if tmp.exists(): shutil.rmtree(tmp)
-    log(f"{site}: segmenting {len(use)} of {len(every)} tiles from {len(stems)} stem candidates within the plot box + {margin:g} m")
+    log(f"{site}: segmenting {len(use)} of {len(every)} tiles from {len(stems)} stem candidates within the plot box + {margin:g} m, "
+        f"each reaching at most {reach:g} m")
     # each tile cut into pieces with heights above the DTM of stage 05, so the trees stand on the same ground as the rest
     # of the products; a piece keeps its points in the tile's order, which is how the labels are put back below
     dtm = project.load_dtm(site); (tmp / "normalised").mkdir(parents=True); pieces = []
     for t in use:
-        c = io.read(str(t.path), attrs=[]); cell = _pieces(c, piece)
+        c = io.read(str(t.path), attrs=[]); c = PointCloud(c.xyz[inside(c)]); cell = _pieces(c, piece)
         for cx, cy in np.unique(cell, axis=0):
             sub = PointCloud(c.xyz[(cell[:, 0] == cx) & (cell[:, 1] == cy)])
             p = tmp / "normalised" / f"{Path(t.path).stem}__{cx}_{cy}.laz"
@@ -352,7 +360,7 @@ def segment(site, margin, buffer, max_buffer, min_height, piece, voxels, workers
             with warnings.catch_warnings(record=True) as warned:
                 warnings.simplefilter("always")
                 found, seg = stiles.segment_trees(norm, stems, tmp / "segmented", buffer=buffer, max_buffer=max_buffer,
-                                                  merge={"voxel_size": voxel}, voxel_size=voxel,
+                                                  merge={"voxel_size": voxel}, voxel_size=voxel, max_reach=reach,
                                                   prune={"min_height": min_height}, attribute="tree_id", workers=workers)
             break
         except ValueError as e:
@@ -369,13 +377,13 @@ def segment(site, margin, buffer, max_buffer, min_height, piece, voxels, workers
     for t in every:
         c = io.read(str(t.path)); lab = np.zeros(len(c), np.int32); n_total += len(c); name = Path(t.path).name
         if t in use:
-            cell = _pieces(c, piece)
+            k = np.flatnonzero(inside(c)); xyz = c.xyz[k]; cell = np.floor(xyz[:, :2] / piece).astype(np.int64)
             for cx, cy in np.unique(cell, axis=0):
                 m = (cell[:, 0] == cx) & (cell[:, 1] == cy); sc = io.read(str(by_name[f"{Path(name).stem}__{cx}_{cy}"]), attrs=["tree_id"])
-                if len(sc) != int(m.sum()) or not np.allclose(sc.xyz, c.xyz[m], atol=1e-3):
+                if len(sc) != int(m.sum()) or not np.allclose(sc.xyz, xyz[m], atol=1e-3):
                     raise RuntimeError(f"{site}: segmented piece {cx}_{cy} of {name} does not hold the merge tile's points in order")
-                lab[m] = np.maximum(sc.attrs["tree_id"].astype(np.int32), 0)
-            del cell
+                lab[k[m]] = np.maximum(sc.attrs["tree_id"].astype(np.int32), 0)
+            del cell, xyz, k
         n_lab += int((lab > 0).sum())
         p = tdir / name; io.write(c.with_attrs(treeid=lab.astype(np.uint32)), str(p)); outs.append(str(p))
     io.write_concat(outs, str(out / f"{site}_07_merged_2cm_treeid.laz"))
@@ -389,8 +397,9 @@ def segment(site, margin, buffer, max_buffer, min_height, piece, voxels, workers
     summary = {"site": site, "method": "sylva.als.tiles.segment_trees (merge_branches, segment_trees, tree_heights, prune_trees) from the stage-06 stems",
                "stem_candidates": len(stems), "trees": len(found), "merged_points": n_total, "labelled_points": n_lab,
                "tiles_segmented": len(use), "area": {"xmin": lo[0], "ymin": lo[1], "xmax": hi[0], "ymax": hi[1]},
+               "segmented_area": {"xmin": alo[0], "ymin": alo[1], "xmax": ahi[0], "ymax": ahi[1]},
                "settings": {"margin": margin, "buffer": buffer, "max_buffer": max_buffer, "min_height": min_height, "piece": piece,
-                            "voxel": voxel},
+                            "voxel": voxel, "max_reach": reach},
                "warnings": [str(w.message) for w in warned], "sylva": project.sylva_version(), "seconds": round(time.time() - t0)}
     project.jsave(summary, out / f"{site}_07_segmentation.json"); project.record_run(site, "07_segmentation", trees=len(found), labelled=n_lab)
     log(f"{site}: {n_lab:,} of {n_total:,} points labelled into {len(found)} trees ({summary['seconds']} s)")

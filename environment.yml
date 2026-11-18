@@ -13,5 +13,5 @@ dependencies:
   - pyarrow             # merge_shots.py
   - pip
   - pip:
-      - sylva-rs>=0.3.1   # imported as sylva
+      - sylva-rs>2.0.0    # imported as sylva; stage 07 needs max_reach (sylva main after 2.0.0, until the next release)
       - segfix>=1.2       # the manual editing step (GUI, PyQt6)

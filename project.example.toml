@@ -17,6 +17,7 @@ ground = { method = "pmf", cell_size = 2.0, max_window = 40.0 }   # stage-05 gro
 # previous_transforms = "{plot}/03_registration/delivered_transforms.json"   # scans[].name, world_from_scan (4x4)
 # manual_trees = "../trees/{plot}"      # one point cloud per tree (.ply/.las/.laz), transferred in stage 07
 segment_trees = true                    # plots without manual trees are segmented automatically (stage 07); false: no tree stages
+max_reach = 15                          # stage 07: farthest (m) a segmented tree reaches from its stem, the widest crown radius
 # manual_trees_table = "../trees/{plot}/trees.csv"   # columns treeid, file (relative to manual_trees); else id = last number in the name
 # manual_trees_frame = "{plot}/03_registration/delivered_dat"   # .DAT matrices the trees were made in (default: the merge's)
 # inventory = "../inventory/{plot}.csv"  # field stem map, for the plot box

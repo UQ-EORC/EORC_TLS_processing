@@ -99,7 +99,9 @@ The transferred tree labels are a starting point; the edited ones are what stage
 
 Plots without manual trees start from an automatic segmentation (stage 07, `sylva.trees`): the stage-06 stems are grown
 into trees over the merge tiles within the plot box plus 15 m (`sylva.als.tiles.segment_trees`, tile by tile), branches
-of another stem merged and candidates under 3 m dropped. The tiles are cut into 10 m pieces first, and the graph's voxel goes from 3 cm to 5 or 8 cm
+of another stem merged and candidates under 3 m dropped. No tree reaches farther than `max_reach` (default 15 m; set it per plot
+to the widest crown radius the stand can have) from its stem, and only the points within that of the seeded area are
+segmented: without the limit a tree takes all the vegetation joined to it, shrubs and the scan beyond the plot included. The tiles are cut into 10 m pieces first, and the graph's voxel goes from 3 cm to 5 or 8 cm
 only when a densely scanned plot does not fit in memory (the size used is in `07_trees/<PLOT>_07_segmentation.json`). The stem finder over-counts and splits
 trees, so expect more editing than for transferred manual trees: merge split crowns, delete false stems (shrubs, logs),
 and check the trees the review list puts first. `segment_trees = false` in `project.toml` gives a plot no tree stages.
