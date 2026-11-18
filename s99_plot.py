@@ -19,10 +19,11 @@ usage: s99_plot.py [PLOT ...] [--bounds] [--no-laz]          (--bounds with no P
   the grid. Scan positions within 1 m (upright and tilted scans on one tripod) count once. The inventory (a CSV with
   columns inventory_x, inventory_y) is in the frame of the matrices in inventory_frame (default: the merge's) and is
   moved into the merge's frame with the median change; stems more than isolated_stem_m (15) from any other are dropped.
-Clip (default) to the box (cells and points inside it; rasters cut to the cells around it, those outside set to nodata),
-next to the full-extent products, which are kept:
+Clip (default) to the box grown by buffer_m (10) on every side, so trees at its edge stay whole (rasters cut to the cells
+around it, those outside set to nodata; points and stems flagged in_plot = 1 inside the box itself); the plot numbers
+(cover, densities, basal area) are over the box itself. Next to the full-extent products, which are kept:
   04_registered/<PLOT>_04_merged_2cm_plot.laz   05_ground/<PLOT>_05_dtm_1m_plot.tif, _05_chm_0.5m_plot.tif
-  06_stems/<PLOT>_06_stems_plot.csv            automatic stems inside the box (they over-count and inflate DBH)
+  06_stems/<PLOT>_06_stems_plot.csv            automatic stems in the buffered box, in_plot column (they over-count and inflate DBH)
   07_trees/<PLOT>_07_trees_vs_plot.csv         per tree (09_leafwood): centroid, share of points outside the box, status
   99_meta/<PLOT>_99_plot_clip.json             areas, CHM cover, counts, and stems/ha, basal area and median DBH from the
                                                trees whose centroid is inside (DBH from the sylva QSM, 08)
@@ -210,11 +211,12 @@ def write_bounds(sites, figure=True):
     plt.close(fig)
 
 
-def clip_raster(src, dst, corners):
+def clip_raster(src, dst, corners, inner=None):
     """Clip the GeoTIFF src to the box with these corners and write it to dst with the same profile.
 
     The window is the cells around the box (snapped to whole cells); cells whose centre is outside the box are set to
-    nodata (NaN when src has none). Returns the clipped band as float with nodata as NaN (row 0 north, as rasterio reads it).
+    nodata (NaN when src has none). Returns the clipped band as float with nodata as NaN (row 0 north, as rasterio reads
+    it) and the mask of its cells whose centre is inside the box inner (all True without one).
     """
     import rasterio
     from rasterio.windows import from_bounds
@@ -225,9 +227,10 @@ def clip_raster(src, dst, corners):
     if nod is not None: a[a == nod] = np.nan
     cx = tr.c + (np.arange(a.shape[1]) + 0.5) * tr.a; cy = tr.f + (np.arange(a.shape[0]) + 0.5) * tr.e   # cell centres
     X, Y = np.meshgrid(cx, cy); a[~project.in_box(c, X, Y)] = np.nan
+    m = np.ones(a.shape, bool) if inner is None else project.in_box(inner, X, Y)
     prof.update(width=a.shape[1], height=a.shape[0], transform=tr, dtype="float32", nodata=np.nan)
     with rasterio.open(dst, "w", **prof) as o: o.write(a.astype(np.float32), 1)
-    return a
+    return a, m
 
 
 def manual_trees(site, area_ha):
@@ -257,18 +260,23 @@ def clip(site, laz=True):
     """
     from sylva import io
     t0 = time.time(); r_ = ROOT / site; box = project.plot_box(site); inside = lambda x, y: project.in_box(box, x, y)
-    rec = {"site": site, "plot_bounds": {"corners": box.round(3).tolist()}, "area_ha": project.box_area_ha(box)}
+    bdist = float(PLOT_BOX["buffer_m"]); grown = project.grow_box(box, bdist); in_clip = lambda x, y: project.in_box(grown, x, y)
+    rec = {"site": site, "plot_bounds": {"corners": box.round(3).tolist()}, "area_ha": project.box_area_ha(box),
+           "clip": {"buffer_m": bdist, "corners": grown.round(3).tolist(), "area_ha": project.box_area_ha(grown)}}
 
-    # rasters: canopy cover is the share of CHM cells at or above 2 m inside the box
-    dtm = clip_raster(r_ / "05_ground" / f"{site}_05_dtm_1m.tif", r_ / "05_ground" / f"{site}_05_dtm_1m_plot.tif", box)
-    chm = clip_raster(r_ / "05_ground" / f"{site}_05_chm_0.5m.tif", r_ / "05_ground" / f"{site}_05_chm_0.5m_plot.tif", box)
+    # rasters cut to the buffered box; canopy cover is the share of CHM cells at or above 2 m inside the box itself
+    dtm, dm = clip_raster(r_ / "05_ground" / f"{site}_05_dtm_1m.tif", r_ / "05_ground" / f"{site}_05_dtm_1m_plot.tif", grown, box)
+    chm, cm = clip_raster(r_ / "05_ground" / f"{site}_05_chm_0.5m.tif", r_ / "05_ground" / f"{site}_05_chm_0.5m_plot.tif", grown, box)
+    dtm, chm = np.where(dm, dtm, np.nan), np.where(cm, chm, np.nan)
     if np.isfinite(chm).any(): rec.update(chm_cover_2m_pct=float(100 * np.nanmean(chm >= 2.0)), chm_p95_m=float(np.nanpercentile(chm, 95)))
     rec["dtm_range_m"] = [float(np.nanmin(dtm)), float(np.nanmax(dtm))]
 
-    # automatic stems (06) inside the box, with their density and basal area (kept for comparison; they over-count)
-    rows = list(csv.DictReader(open(r_ / "06_stems" / f"{site}_06_stems.csv"))); keep = [r for r in rows if inside(float(r["x"]), float(r["y"]))]
+    # automatic stems (06) in the buffered box, flagged in_plot inside the box, with the density and basal area of those
+    # inside (kept for comparison; they over-count)
+    rows = list(csv.DictReader(open(r_ / "06_stems" / f"{site}_06_stems.csv")))
+    near = [dict(r, in_plot=int(inside(float(r["x"]), float(r["y"])))) for r in rows if in_clip(float(r["x"]), float(r["y"]))]; keep = [r for r in near if r["in_plot"]]
     with open(r_ / "06_stems" / f"{site}_06_stems_plot.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(keep)
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) + ["in_plot"]); w.writeheader(); w.writerows(near)
     dbh = np.array([float(r["dbh"]) for r in keep]); dbh = dbh[np.isfinite(dbh)]
     rec.update(stems_all=len(rows), stems_plot=len(keep), stems_per_ha=len(keep) / rec["area_ha"], basal_area_m2_ha=float(np.sum(np.pi * (dbh / 2) ** 2) / rec["area_ha"]),
                dbh_median_cm=float(100 * np.median(dbh)) if len(dbh) else None)
@@ -290,12 +298,14 @@ def clip(site, laz=True):
 
     # merged cloud: each 2 cm tile clipped to the box into scratch, then the pieces joined into one LAZ
     if laz:
-        tmp = project.SCRATCH / "clip" / site; tmp.mkdir(parents=True, exist_ok=True); parts = []; n_in = n_all = 0
+        tmp = project.SCRATCH / "clip" / site; tmp.mkdir(parents=True, exist_ok=True); parts = []; n_in = n_buf = n_all = 0
         for t in project.merged_tiles(site):
-            c = io.read(t); x, y = c.xyz[:, 0], c.xyz[:, 1]; n_all += len(x); m = inside(x, y)
-            if m.any(): p = tmp / Path(t).name; io.write(c[m], p); parts.append(str(p)); n_in += int(m.sum())
+            c = io.read(t); x, y = c.xyz[:, 0], c.xyz[:, 1]; n_all += len(x); m = in_clip(x, y)
+            if m.any():
+                c = c[m]; f = inside(c.xyz[:, 0], c.xyz[:, 1]); p = tmp / Path(t).name
+                io.write(c.with_attrs(in_plot=f.astype(np.uint8)), p); parts.append(str(p)); n_in += int(f.sum()); n_buf += int((~f).sum())
         io.write_concat(parts, r_ / "04_registered" / f"{site}_04_merged_2cm_plot.laz"); shutil.rmtree(tmp)
-        rec.update(merged_points_all=n_all, merged_points_plot=n_in)
+        rec.update(merged_points_all=n_all, merged_points_plot=n_in, merged_points_buffer=n_buf)
     rec["seconds"] = round(time.time() - t0); project.jsave(rec, r_ / "99_meta" / f"{site}_99_plot_clip.json"); project.record_run(site, "99_plot_clip")
     log(f"{site}: {rec['area_ha']:.2f} ha, trees {rec.get('trees')}, basal area {rec.get('manual_basal_area_m2_ha', float('nan')):.1f} m2/ha")
 

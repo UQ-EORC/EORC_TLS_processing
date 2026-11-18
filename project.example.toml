@@ -26,6 +26,7 @@ inventory_y = "y"
 
 [plot_box]                              # the plot box: a square placed on the inventory and the scans (s99_plot.py --bounds)
 size_m = 100                            # side of the square (100 m: 1 ha)
+buffer_m = 10                           # clipped products reach this far beyond it (plot numbers are over the square)
 max_rotation_deg = 10                   # the square may turn this far either way
 cover_r_m = 15                          # a scan position covers the ground within this distance
 stem_slack = 0.01                       # share of the inventory stems a square may leave out

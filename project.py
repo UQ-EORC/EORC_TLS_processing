@@ -62,9 +62,9 @@ DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter":
 DEFAULTS.update(CONFIG.get("defaults", {}))
 # the plot box (m): nominal side, how far field stems may lie outside it, the distance beyond which a stem counts as isolated
 # the plot box (s99_plot.py --bounds): a square of side size_m placed on the field inventory and the scan positions, turned
-# by at most max_rotation_deg; see s99_plot.py for cover_r_m, stem_slack and cover_slack, and isolated_stem_m (inventory
+# by at most max_rotation_deg; the clipped products reach buffer_m beyond it (plot numbers are over the box itself); see s99_plot.py for cover_r_m, stem_slack and cover_slack, and isolated_stem_m (inventory
 # stems farther than this from any other are ignored)
-PLOT_BOX = {"size_m": 100.0, "max_rotation_deg": 10.0, "cover_r_m": 15.0, "stem_slack": 0.01, "cover_slack": 0.005, "isolated_stem_m": 15.0,
+PLOT_BOX = {"size_m": 100.0, "buffer_m": 10.0, "max_rotation_deg": 10.0, "cover_r_m": 15.0, "stem_slack": 0.01, "cover_slack": 0.005, "isolated_stem_m": 15.0,
             **CONFIG.get("plot_box", {})}
 
 
@@ -325,6 +325,12 @@ def in_box(corners, x, y):
 def in_plot(plot, x, y):
     """Mask of the points (x, y) inside the plot box."""
     return in_box(plot_box(plot), x, y)
+
+
+def grow_box(corners, d):
+    """The corners of a rectangular box (anticlockwise) moved out by d m on every side, along its own sides."""
+    c = _corners(corners); e1 = (c[1] - c[0]) / np.linalg.norm(c[1] - c[0]); e2 = (c[3] - c[0]) / np.linalg.norm(c[3] - c[0])
+    return np.array([c[0] - d * (e1 + e2), c[1] + d * (e1 - e2), c[2] + d * (e1 + e2), c[3] - d * (e1 - e2)])
 
 
 def box_area_ha(corners):

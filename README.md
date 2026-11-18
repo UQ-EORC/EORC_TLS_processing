@@ -61,7 +61,9 @@ Notes on the methods:
   turn up to 10 degrees. It holds as many field inventory stems as any square can (1 % slack), then as much of the
   scanned ground as possible (a cell counts by the scan positions within 15 m, saturating), then sits nearest the mean
   scan position; it turns only when that fits clearly more. Plots scanned on a regular grid can set `scan_grid_rings`
-  to put the square along the grid instead. The box is stored as its corners; `s99_plot.py --bounds` also draws
+  to put the square along the grid instead. The clipped `_plot` products reach `buffer_m` (10 m) beyond the square, so
+  trees at its edge stay whole (points and stems flagged `in_plot`); plot numbers are over the square itself. The box
+  is stored as its corners; `s99_plot.py --bounds` also draws
   `<project>_plot_bounds_check.png`.
 - The canopy stages use every pulse. A point filter (reflectance floor, deviation cap) removes pulses whose echoes all
   fail it, which overstates gaps and understates plant area, so stage 02 reads the raw scans without one.
