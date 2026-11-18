@@ -45,7 +45,7 @@ with the date and the sylva version.
 | 02 | `s02_shots.py` | `02_shots` | every pulse from the raw `.rxp`, unfiltered, misses rebuilt (runs after 03: it reads the scan list) |
 | 04 | `s04_merge.py` | `04_registered` | 2 cm voxel-thinned merge, tiles and one LAZ |
 | 05 | `s05_ground.py` | `05_ground`, `06_stems`, `90_qc` | DTM, CHM, automatic stems, QC figures |
-| 99b | `s99_plot.py --bounds` | `99_meta/*_plot_bounds` | plot box from the field stem map |
+| 99b | `s99_plot.py --bounds` | `99_meta/*_plot_bounds` | plot box: a 1 ha square on the field stem map and the scan positions |
 | 07 | `s07_trees.py` | `07_trees` | tree labels: manual trees carried onto the merge, else automatic segmentation from the 06 stems; review list |
 | 07e | `s07_segfix.py` | `07_trees/*_segfix`, `*_trees_edited_tiles` | manual editing in segfix (below) |
 | 08 | `s08_tree_models.py` | `08_qsm`, `09_leafwood` | raycloudtools and sylva QSMs, leaf/wood, plot meshes |
@@ -57,6 +57,12 @@ Stage folders sit in `<project>/<PLOT>/`, files are named `<PLOT>_<stage>_<what>
 `11_canopy`, `90_qc`, `99_meta`.
 
 Notes on the methods:
+- Every plot is clipped to the same area: a square of `size_m` (100 m, 1 ha; `[plot_box]` in `project.toml`) that may
+  turn up to 10 degrees. It holds as many field inventory stems as any square can (1 % slack), then as much of the
+  scanned ground as possible (a cell counts by the scan positions within 15 m, saturating), then sits nearest the mean
+  scan position; it turns only when that fits clearly more. Plots scanned on a regular grid can set `scan_grid_rings`
+  to put the square along the grid instead. The box is stored as its corners; `s99_plot.py --bounds` also draws
+  `<project>_plot_bounds_check.png`.
 - The canopy stages use every pulse. A point filter (reflectance floor, deviation cap) removes pulses whose echoes all
   fail it, which overstates gaps and understates plant area, so stage 02 reads the raw scans without one.
 - The ground filter is PMF (2 m cells, 40 m window) unless a plot sets `ground`. On steep or broken terrain PMF can cut

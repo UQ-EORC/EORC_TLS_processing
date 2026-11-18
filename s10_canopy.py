@@ -95,14 +95,14 @@ def run(site, voxel=0.5, buffer=20.0, workers=8, keep_shots=False):
     # beam could see; PAD from the free-path-length (FPL) attenuation with a spherical leaf angle distribution (G = 0.5).
     # The grid is processed in blocks of 64^3 voxels written under vdir, within 20 GB of memory.
     g = voxels.ray_voxelize(str(plot), voxel, (lo, hi), dtm=dtm, ground_distance=0.2, occlusion=True, attenuation=["fpl"], block_size=64, out=vdir, max_memory=20, workers=workers)
-    t2 = time.time(); xy = project.plot_bounds(site)
+    t2 = time.time(); xy = project.plot_box(site)
     pai_vox = write_profile(site, voxel, voxel_profile(g, voxel, hi[2] - lo[2], xy), rep, scal)
     # the manifest, written last: its presence marks the plot as done (see done())
     rec = {"site": site, "run": f"{time.strftime('%Y-%m-%d')} from 02_shots", "shots": "02_shots", "matrices": msrc, "scans": names, "upright_scans": upright,
            "matrices_without_shots": sorted(set(M) - set(have)), "shots_without_matrix": sorted(allshots - set(M)), "pulses": n_shots, "echoes": n_echoes,
            "voxel": {"size_m": voxel, "bounds": [lo, hi], "dtm": "05_ground dtm_1m, nearest-filled", "ground_distance_m": 0.2, "occlusion": True, "attenuation": "fpl",
                      "lad": "spherical", "beam": None, "min_beams_profile": MIN_BEAMS, "block_stats": dict(g.block_stats), "pai_voxel": pai_vox,
-                     "profile_region": {"plot_bounds": xy, "note": "voxel profile and PAI over voxels inside the plot box"}},
+                     "profile_region": {"plot_bounds": xy.round(3).tolist(), "note": "voxel profile and PAI over voxels inside the plot box"}},
            "gap_profile": scal, "seconds": {"frame": round(t1 - t0), "trace": round(t2 - t1), "total": round(time.time() - t0)}}
     project.jsave(rec, mf)
     if not keep_shots: shutil.rmtree(tmp)
@@ -110,7 +110,7 @@ def run(site, voxel=0.5, buffer=20.0, workers=8, keep_shots=False):
 
 
 def voxel_profile(g, voxel, z_extent, xy):
-    """Profile by height above the DTM over the voxels whose centre lies in the plot box xy = (xmin, ymin, xmax, ymax).
+    """Profile by height above the DTM over the voxels whose centre lies in the plot box xy (its corners, project.plot_box).
 
     g: the blocked voxel grid of ray_voxelize (project frame); voxel: voxel edge (m), also the height bin; z_extent: height
     of the grid (m), which bounds the number of bins (taller heights go in the top bin). Returns a dict of per-bin arrays:
@@ -122,7 +122,7 @@ def voxel_profile(g, voxel, z_extent, xy):
     cnt, obs, occ, pad_sum, pad_n = (np.zeros(nb) for _ in range(5))
     for _, b in g.blocks():                                          # one block at a time keeps memory at a block
         X, Y, _ = b.centers(); h = b["distance_from_ground"].ravel()
-        ok = np.isfinite(h) & (h >= 0) & (X.ravel() >= xy[0]) & (X.ravel() <= xy[2]) & (Y.ravel() >= xy[1]) & (Y.ravel() <= xy[3])
+        ok = np.isfinite(h) & (h >= 0) & project.in_box(xy, X.ravel(), Y.ravel())
         if not ok.any(): continue
         k = np.minimum((h[ok] / voxel).astype(int), nb - 1)          # height bin of each voxel kept
         # state: 0 unobserved, 1 occluded, 2 empty, 3 filled (sylva.voxels.STATES)
@@ -172,9 +172,9 @@ def reprofile(site, voxel=0.5, **_):
     mf = ROOT / site / "10_voxels" / f"{site}_10_11_manifest.json"; rec = json.load(open(mf)); lo, hi = rec["voxel"]["bounds"]
     # the gap profile as a dict of columns, as write_profile expects from the report
     a = np.genfromtxt(ROOT / site / "11_canopy" / f"{site}_11_pavd_profile.csv", delimiter=",", names=True); rep = {k: a[k] for k in a.dtype.names}
-    g = open_blocked(ROOT / site / "10_voxels" / f"{site}_10_voxels_{voxel:g}m"); xy = project.plot_bounds(site)
+    g = open_blocked(ROOT / site / "10_voxels" / f"{site}_10_voxels_{voxel:g}m"); xy = project.plot_box(site)
     rec["voxel"]["pai_voxel"] = write_profile(site, voxel, voxel_profile(g, voxel, hi[2] - lo[2], xy), rep, rec["gap_profile"])
-    rec["voxel"]["profile_region"] = {"plot_bounds": xy, "note": "voxel profile and PAI over voxels inside the plot box"}; project.jsave(rec, mf)
+    rec["voxel"]["profile_region"] = {"plot_bounds": xy.round(3).tolist(), "note": "voxel profile and PAI over voxels inside the plot box"}; project.jsave(rec, mf)
 
 
 def done(site):

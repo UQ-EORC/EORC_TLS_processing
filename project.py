@@ -56,11 +56,16 @@ PYARROW_PYTHON = str(_path(_paths["pyarrow_python"])) if "pyarrow_python" in _pa
 DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter": None, "unregistered": [], "no_prior": [], "previous_transforms": None,
             "segment_trees": True, "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
             "inventory_x": "x", "inventory_y": "y", "code": None, "name": None,
+            "scan_grid_rings": None,      # scan positions on a regular grid: plot box along the grid, this many outer rings left out
             # stage-05 ground filter: method "pmf" (sylva.ground.classify_ground_pmf) or "csf" (classify_ground_csf), and its keywords
             "ground": {"method": "pmf", "cell_size": 2.0, "max_window": 40.0}}
 DEFAULTS.update(CONFIG.get("defaults", {}))
 # the plot box (m): nominal side, how far field stems may lie outside it, the distance beyond which a stem counts as isolated
-PLOT_BOX = {"size_m": 100.0, "tolerance_m": 4.0, "isolated_stem_m": 15.0, **CONFIG.get("plot_box", {})}
+# the plot box (s99_plot.py --bounds): a square of side size_m placed on the field inventory and the scan positions, turned
+# by at most max_rotation_deg; see s99_plot.py for cover_r_m, stem_slack and cover_slack, and isolated_stem_m (inventory
+# stems farther than this from any other are ignored)
+PLOT_BOX = {"size_m": 100.0, "max_rotation_deg": 10.0, "cover_r_m": 15.0, "stem_slack": 0.01, "cover_slack": 0.005, "isolated_stem_m": 15.0,
+            **CONFIG.get("plot_box", {})}
 
 
 def plots():
@@ -285,20 +290,53 @@ def load_raster(path):
 def load_dtm(plot): return load_raster(ROOT / plot / "05_ground" / f"{plot}_05_dtm_1m.tif")
 
 
-def same_bounds(stored, plot):
-    """Whether a plot box stored in a record (a dict with xmin..ymax or a 4-sequence) is the plot's current one (to 1 mm)."""
-    if stored is None: return False
-    if isinstance(stored, dict): stored = [stored[k] for k in ("xmin", "ymin", "xmax", "ymax")]
-    return bool(np.allclose(np.asarray(stored, float), np.asarray(plot_bounds(plot), float), atol=1e-3))
+def _corners(box):
+    """(4, 2) corners, anticlockwise, of a box given as corners, as a dict with corners or xmin..ymax, or as (xmin, ymin,
+    xmax, ymax)."""
+    if isinstance(box, dict): box = box["corners"] if "corners" in box else [box[k] for k in ("xmin", "ymin", "xmax", "ymax")]
+    a = np.asarray(box, float)
+    if a.shape == (4,): x0, y0, x1, y1 = a; a = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+    return a
+
+
+def plot_box(plot):
+    """The (4, 2) corners of the plot box, anticlockwise, project frame: 99_meta/<PLOT>_99_plot_bounds.json (s99_plot.py
+    --bounds; a square that may be turned a few degrees), else the rectangle around the scan positions."""
+    j = jload(ROOT / plot / "99_meta" / f"{plot}_99_plot_bounds.json")
+    if j: return _corners(j)
+    o = np.array([m[:3, 3] for m in matrices(plot)[0].values()])   # the scanner positions: translations of world_from_scan
+    return _corners((o[:, 0].min(), o[:, 1].min(), o[:, 0].max(), o[:, 1].max()))
 
 
 def plot_bounds(plot):
-    """(xmin, ymin, xmax, ymax) of the plot box (99_meta/<PLOT>_99_plot_bounds.json, s99_plot.py --bounds), else the box
-    around the scan positions."""
-    j = jload(ROOT / plot / "99_meta" / f"{plot}_99_plot_bounds.json")
-    if j: return j["xmin"], j["ymin"], j["xmax"], j["ymax"]
-    o = np.array([m[:3, 3] for m in matrices(plot)[0].values()])   # the scanner positions: translations of world_from_scan
-    return float(o[:, 0].min()), float(o[:, 1].min()), float(o[:, 0].max()), float(o[:, 1].max())
+    """(xmin, ymin, xmax, ymax) around the plot box: the region to read or segment. Use in_plot for what is inside it."""
+    c = plot_box(plot)
+    return float(c[:, 0].min()), float(c[:, 1].min()), float(c[:, 0].max()), float(c[:, 1].max())
+
+
+def in_box(corners, x, y):
+    """Mask of the points (x, y) inside the convex box with these corners (anticlockwise), edges included."""
+    c = _corners(corners); x = np.asarray(x, float); y = np.asarray(y, float); inside = np.ones(np.broadcast(x, y).shape, bool)
+    for (ax, ay), (bx, by) in zip(c, np.roll(c, -1, axis=0)):       # left of (or on) every edge
+        inside &= (bx - ax) * (y - ay) - (by - ay) * (x - ax) >= -1e-9
+    return inside
+
+
+def in_plot(plot, x, y):
+    """Mask of the points (x, y) inside the plot box."""
+    return in_box(plot_box(plot), x, y)
+
+
+def box_area_ha(corners):
+    """Area (ha) of a box given by its corners (shoelace formula)."""
+    c = _corners(corners); return float(abs(np.dot(c[:, 0], np.roll(c[:, 1], -1)) - np.dot(c[:, 1], np.roll(c[:, 0], -1))) / 2 / 1e4)
+
+
+def same_bounds(stored, plot):
+    """Whether a plot box stored in a record (corners, a dict with corners or xmin..ymax, or a 4-sequence) is the plot's
+    current one (to 1 mm)."""
+    if stored is None: return False
+    return bool(np.allclose(_corners(stored), plot_box(plot), atol=1e-3))
 
 
 # Where s07_segfix.py import writes the tree labels edited in segfix (tree_tiles prefers them once they exist).

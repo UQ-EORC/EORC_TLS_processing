@@ -3,13 +3,24 @@ density and basal area from the segmented trees (manual or automatic, as edited 
 
 usage: s99_plot.py [PLOT ...] [--bounds] [--no-laz]          (--bounds with no PLOT also draws the check figure)
 
---bounds writes the plot boxes (99_meta/<PLOT>_99_plot_bounds.json and .geojson, and <project>_plot_bounds_check.png),
-  with the sizes of [plot_box] in project.toml (defaults in brackets): where the plot's field inventory spans size_m
-  (100) +- tolerance_m (4) in x and y, a square of size_m centred on it; otherwise the inventory's extent rounded out to
-  whole metres (stems more than isolated_stem_m (15) from any other dropped); plots without an inventory get a square of
-  size_m centred on the scan positions. The inventory (a CSV with columns inventory_x, inventory_y) is in the frame of
-  the matrices in inventory_frame (default: the merge's) and is moved into the merge's frame with the median change.
-Clip (default), next to the full-extent products, which are kept:
+--bounds writes the plot boxes (99_meta/<PLOT>_99_plot_bounds.json and .geojson, and <project>_plot_bounds_check.png):
+  a square of side size_m ([plot_box] in project.toml; defaults in brackets), so every plot covers the same area (100 m:
+  1 ha). At every rotation from -max_rotation_deg (10) to +max_rotation_deg in 1 degree steps, the best square is found in
+  three steps: (1) inventory: keep the squares holding as many field inventory stems as any square can, less stem_slack
+  (1 %) of them, so a small cluster of stems only has to sit inside the square and does not pull it onto itself (plots
+  without an inventory skip this); (2) scan coverage: each cell scores 1 - exp(-n / 2), n the scan positions within
+  cover_r_m (15) of it, so a cell seen from two positions counts almost as much as one seen from ten; keep the squares
+  within cover_slack (0.5 %) of the best total, which follows the scans however irregular their layout and ignores stray
+  positions; (3) the square whose centre is nearest the mean scan position. The rotation is the smallest within the
+  stem slack of the most stems any rotation holds (no inventory: within the cover slack of the best coverage), so a
+  square only turns when that clearly fits more. Searched on a 1 m grid, the chosen rotation solved again on 0.5 m.
+  Plots whose scan positions form a regular grid can set scan_grid_rings = N: the grid's rotation and spacing are fitted
+  to the positions, the outer N rings left out, and the square centred on the remaining positions with its sides along
+  the grid. Scan positions within 1 m (upright and tilted scans on one tripod) count once. The inventory (a CSV with
+  columns inventory_x, inventory_y) is in the frame of the matrices in inventory_frame (default: the merge's) and is
+  moved into the merge's frame with the median change; stems more than isolated_stem_m (15) from any other are dropped.
+Clip (default) to the box (cells and points inside it; rasters cut to the cells around it, those outside set to nodata),
+next to the full-extent products, which are kept:
   04_registered/<PLOT>_04_merged_2cm_plot.laz   05_ground/<PLOT>_05_dtm_1m_plot.tif, _05_chm_0.5m_plot.tif
   06_stems/<PLOT>_06_stems_plot.csv            automatic stems inside the box (they over-count and inflate DBH)
   07_trees/<PLOT>_07_trees_vs_plot.csv         per tree (09_leafwood): centroid, share of points outside the box, status
@@ -56,70 +67,166 @@ def inventory(site):
     return q
 
 
+def scan_positions(site):
+    """(n, 2) xy of the scan positions, project frame, one per tripod: positions within 1 m of one already kept are dropped."""
+    keep = []
+    for p in np.array([m[:2, 3] for m in project.matrices(site)[0].values()]):
+        if not keep or np.min(np.hypot(*(np.array(keep) - p).T)) > 1.0: keep.append(p)
+    return np.array(keep)
+
+
+def _rot(xy, deg):
+    """xy in a frame turned deg anticlockwise: (x cos + y sin, -x sin + y cos)."""
+    c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+    return np.c_[xy[:, 0] * c + xy[:, 1] * s, -xy[:, 0] * s + xy[:, 1] * c]
+
+
+def _box_sums(a, n):
+    """Sum of every n x n window of a (whole windows only), from the integral image."""
+    s = np.zeros((a.shape[0] + 1, a.shape[1] + 1)); s[1:, 1:] = a.cumsum(0).cumsum(1)
+    return s[n:, n:] - s[:-n, n:] - s[n:, :-n] + s[:-n, :-n]
+
+
+def square_corners(centre, deg, size):
+    """The (4, 2) corners of a square of side size centred on centre, turned deg anticlockwise; anticlockwise from the
+    corner at the square's own (0, 0)."""
+    local = np.array([[0, 0], [size, 0], [size, size], [0, size]], float) - size / 2
+    return _rot(local, -deg) + centre
+
+
+class Coverage:
+    """The number of scan positions within cover_r_m of every point of a fixed world grid (cell 0.25 m), sampled at any xy."""
+    def __init__(self, scans, pts, size, r):
+        from scipy.spatial import cKDTree
+        self.x0, self.y0 = np.floor(pts.min(0) - size); x1, y1 = np.ceil(pts.max(0) + size); self.c = 0.25
+        nx, ny = int((x1 - self.x0) / self.c), int((y1 - self.y0) / self.c)
+        gx, gy = np.meshgrid(self.x0 + (np.arange(nx) + 0.5) * self.c, self.y0 + (np.arange(ny) + 0.5) * self.c, indexing="ij")
+        self.n = np.array([len(v) for v in cKDTree(scans).query_ball_point(np.c_[gx.ravel(), gy.ravel()], r)]).reshape(nx, ny)
+
+    def sample(self, xy):
+        i = np.clip(((xy[:, 0] - self.x0) / self.c).astype(int), 0, self.n.shape[0] - 1)
+        j = np.clip(((xy[:, 1] - self.y0) / self.c).astype(int), 0, self.n.shape[1] - 1)
+        return self.n[i, j]
+
+
+def best_at(deg, scans, stems, cov, cell, box):
+    """The best square at one rotation (steps 1-3 of the module docstring). box: PLOT_BOX. Returns (the most stems a square
+    holds, its coverage (m2, saturated), its centre in world xy)."""
+    size = box["size_m"]; pts = scans if stems is None else np.vstack([scans, stems]); r = _rot(pts, deg)
+    u0, v0 = np.floor(r.min(0) - size * 0.6); u1, v1 = np.ceil(r.max(0) + size * 0.6)
+    nu, nv = int((u1 - u0) / cell), int((v1 - v0) / cell)
+    gu, gv = np.meshgrid(u0 + (np.arange(nu) + 0.5) * cell, v0 + (np.arange(nv) + 0.5) * cell, indexing="ij")
+    n = cov.sample(_rot(np.c_[gu.ravel(), gv.ravel()], -deg)).reshape(nu, nv); w = int(round(size / cell))
+    cover = _box_sums(1 - np.exp(-n / 2.0), w) * cell * cell; ok = np.ones_like(cover, bool); most = 0
+    if stems is not None:                                            # 1: as many stems as any square holds, less the slack
+        rs = _rot(stems, deg); h, _, _ = np.histogram2d(rs[:, 0], rs[:, 1], bins=(nu, nv), range=((u0, u0 + nu * cell), (v0, v0 + nv * cell)))
+        n_in = _box_sums(h, w); most = int(n_in.max()); ok &= n_in >= most - np.floor(box["stem_slack"] * len(stems))
+    best = cover[ok].max(); ok &= cover >= (1 - box["cover_slack"]) * best   # 2: coverage within the slack of the best
+    i, j = np.nonzero(ok); centres = np.c_[u0 + (i + w / 2) * cell, v0 + (j + w / 2) * cell]
+    k = int(np.argmin(np.hypot(*(centres - _rot(scans.mean(0)[None], deg)[0]).T)))   # 3: nearest the mean scan position
+    return most, float(best), _rot(centres[k:k + 1], -deg)[0]
+
+
+def grid_square(scans, rings, box):
+    """For scan positions on a regular grid: (rotation, centre, text) of the square along the grid, centred on the
+    positions left after dropping the outer `rings` rings. The grid's rotation (0.05 degree steps) and spacing are those
+    that put the positions nearest to grid nodes."""
+    from scipy.spatial import cKDTree
+    nn = np.median(cKDTree(scans).query(scans, k=2)[0][:, 1]); best = None; mr = box["max_rotation_deg"]
+    for deg in np.arange(-mr, mr + 0.001, 0.05):
+        r = _rot(scans, deg)
+        for sp in np.arange(0.8 * nn, 1.6 * nn, 0.05):              # above half the grid step, which would fit too
+            res = 0.0
+            for k in (0, 1):                                         # mean distance to the nearest grid line, per axis
+                q = r[:, k] / sp; off = np.angle(np.exp(2j * np.pi * q).mean()) / (2 * np.pi); res += np.abs((q - off + 0.5) % 1 - 0.5).mean() * sp
+            if best is None or res < best[2]: best = (float(deg), float(sp), res / 2)
+    deg, sp, res = best; r = _rot(scans, deg)
+    iu = np.round((r[:, 0] - r[:, 0].min()) / sp).astype(int); iv = np.round((r[:, 1] - r[:, 1].min()) / sp).astype(int)
+    inner = (iu >= rings) & (iu <= iu.max() - rings) & (iv >= rings) & (iv <= iv.max() - rings); ri = r[inner]
+    how = (f"{box['size_m']:g} m square on the scan grid ({sp:.2f} m spacing, {deg:+.2f} degrees, mean residual {res:.2f} m), "
+           f"outer {rings} ring(s) left out; the inner {int(inner.sum())} positions span {np.ptp(ri[:, 0]):.1f} x {np.ptp(ri[:, 1]):.1f} m")
+    return deg, _rot(((ri.min(0) + ri.max(0)) / 2)[None], -deg)[0], how
+
+
 def propose(site):
     """The plot box of a plot, by the rules of the module docstring.
 
-    Returns (box (xmin, ymin, xmax, ymax), scan box (the extent of the scan positions), how the box was made (text),
-    inventory xy or None), all in the project frame (m).
+    Returns (record for 99_meta/<PLOT>_99_plot_bounds.json, scan positions, inventory xy or None, Coverage), project frame.
     """
-    o = np.array([m[:3, 3] for m in project.matrices(site)[0].values()]); scan = (o[:, 0].min(), o[:, 1].min(), o[:, 0].max(), o[:, 1].max())
-    p = inventory(site); size = PLOT_BOX["size_m"]; h = size / 2
-    if p is None:
-        c = ((scan[0] + scan[2]) / 2, (scan[1] + scan[3]) / 2)
-        return (c[0] - h, c[1] - h, c[0] + h, c[1] + h), scan, f"{size:g} m square centred on the scan positions (no field inventory)", p
-    lo, hi = p.min(0), p.max(0)
-    # the stems span the nominal size in both x and y: the plot is that square (stems sit a little inside its edges);
-    # otherwise the stems' own extent, rounded out to whole metres
-    if np.all(np.abs(hi - lo - size) <= PLOT_BOX["tolerance_m"]): c = (lo + hi) / 2; b = (c[0] - h, c[1] - h, c[0] + h, c[1] + h); how = f"{size:g} m square on the field inventory"
-    else: b = (np.floor(lo[0]), np.floor(lo[1]), np.ceil(hi[0]), np.ceil(hi[1])); how = f"extent of the field inventory ({len(p)} stems)"
-    return tuple(float(v) for v in b), scan, how, p
+    box = PLOT_BOX; size = float(box["size_m"]); scans = scan_positions(site); stems = inventory(site)
+    cov = Coverage(scans, scans if stems is None else np.vstack([scans, stems]), size, box["cover_r_m"])
+    rings = project.setting(site, "scan_grid_rings")
+    if rings: deg, centre, how = grid_square(scans, int(rings), box)
+    else:
+        mr = box["max_rotation_deg"]; trials = [(d, *best_at(d, scans, stems, cov, 1.0, box)[:2]) for d in np.arange(-mr, mr + 0.5, 1.0)]
+        if stems is not None:                                        # the smallest rotation within the slack of the most stems
+            most = max(t[1] for t in trials); trials = [t for t in trials if t[1] >= most - np.floor(box["stem_slack"] * len(stems))]
+        else:                                                        # no inventory: within the slack of the best coverage
+            top = max(t[2] for t in trials); trials = [t for t in trials if t[2] >= (1 - box["cover_slack"]) * top]
+        deg = float(min(trials, key=lambda t: abs(t[0]))[0]); centre = best_at(deg, scans, stems, cov, 0.5, box)[2]
+        how = (f"{size:g} m square: " + ("most field inventory stems, then " if stems is not None else "no field inventory; ")
+               + f"best scan coverage, then nearest the mean scan position; turned {deg:+g} degrees")
+    cs = square_corners(centre, deg, size)
+    g = (np.arange(int(size / 0.5)) + 0.5) * 0.5 - size / 2; gu, gv = np.meshgrid(g, g, indexing="ij")
+    seen = cov.sample(_rot(np.c_[gu.ravel(), gv.ravel()], -deg) + centre) >= 1
+    rec = {"site": site, "definition": how, "centre_x": float(centre[0]), "centre_y": float(centre[1]), "angle_deg": deg, "size_m": size,
+           "corners": [[round(float(x), 3), round(float(y), 3)] for x, y in cs],
+           "xmin": float(cs[:, 0].min()), "ymin": float(cs[:, 1].min()), "xmax": float(cs[:, 0].max()), "ymax": float(cs[:, 1].max()),
+           "area_ha": size * size / 1e4, "scan_positions": len(scans), "scan_positions_inside": int(project.in_box(cs, scans[:, 0], scans[:, 1]).sum()),
+           "inventory_stems": None if stems is None else len(stems),
+           "inventory_stems_inside": None if stems is None else int(project.in_box(cs, stems[:, 0], stems[:, 1]).sum()),
+           f"share_within_{box['cover_r_m']:g}m_of_a_scan": round(float(seen.mean()), 4), "settings": dict(box), "frame": "project frame of stages 04-11"}
+    return rec, scans, stems, cov
 
 
 def write_bounds(sites, figure=True):
     """Write the plot box of every plot in sites (99_meta/<PLOT>_99_plot_bounds.json and .geojson, project frame).
 
-    figure: also save <project root>/<project>_plot_bounds_check.png, one panel per plot with the stage-06 stems, the
-    inventory stems, the extent of the scan positions and the box (drawn either way, saved only then).
+    figure: also save <project root>/<project>_plot_bounds_check.png, one panel per plot with the scan coverage, the scan
+    positions, the inventory stems and the box (drawn either way, saved only then).
     """
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
     n = len(sites); cols = min(4, n); rows = -(-n // cols)            # up to 4 panels a row; rows rounded up
-    fig, axs = plt.subplots(rows, cols, figsize=(4.5 * cols, 4.7 * rows), facecolor="#fcfcfb", squeeze=False)
+    fig, axs = plt.subplots(rows, cols, figsize=(4.6 * cols, 4.9 * rows), facecolor="#fcfcfb", squeeze=False)
     for ax in axs.ravel()[n:]: ax.set_visible(False)                  # hide the unused panels of the last row
     for ax, site in zip(axs.ravel(), sites):
-        b, scan, how, p = propose(site); x0, y0, x1, y1 = b
-        st = list(csv.DictReader(open(ROOT / site / "06_stems" / f"{site}_06_stems.csv")))
-        ax.scatter([float(r["x"]) for r in st], [float(r["y"]) for r in st], s=1, color="#b3b2ab", label="detected stems (06)")
-        if p is not None: ax.scatter(p[:, 0], p[:, 1], s=4, color="#2a78d6", label="field inventory stems")
-        sx0, sy0, sx1, sy1 = scan; ax.plot([sx0, sx1, sx1, sx0, sx0], [sy0, sy0, sy1, sy1, sy0], color="#52514e", lw=1, ls="--", label="scan positions")
-        ax.plot([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0], color="#e34948", lw=2, label="plot box")
-        ax.set_aspect("equal"); ax.set_title(f"{site}: {x1 - x0:.0f} x {y1 - y0:.0f} m\n{how}", fontsize=10, loc="left"); ax.tick_params(labelsize=8)
-        # the box as JSON (read by project.plot_bounds) and as a GeoJSON polygon (project frame, not a geographic CRS)
-        rec = {"site": site, "definition": how, "xmin": x0, "ymin": y0, "xmax": x1, "ymax": y1, "width_m": x1 - x0, "height_m": y1 - y0,
-               "area_ha": (x1 - x0) * (y1 - y0) / 1e4, "frame": "project frame of stages 04-11"}
+        rec, scans, stems, cov = propose(site); ring = rec["corners"] + rec["corners"][:1]
+        ext = (cov.x0, cov.x0 + cov.n.shape[0] * cov.c, cov.y0, cov.y0 + cov.n.shape[1] * cov.c)
+        ax.imshow((1 - np.exp(-cov.n / 2.0)).T, origin="lower", extent=ext, cmap="Greys", vmin=0, vmax=2.5, interpolation="nearest")
+        ax.scatter(scans[:, 0], scans[:, 1], s=9, marker="^", color="#1f1f1f", label="scan positions", zorder=3)
+        if stems is not None: ax.scatter(stems[:, 0], stems[:, 1], s=3, color="#2a78d6", label="field inventory stems", zorder=2)
+        ax.plot(*np.array(ring).T, color="#e34948", lw=2, label="plot box", zorder=4)
+        pad = 15; ax.set_xlim(min(scans[:, 0].min(), rec["xmin"]) - pad, max(scans[:, 0].max(), rec["xmax"]) + pad)
+        ax.set_ylim(min(scans[:, 1].min(), rec["ymin"]) - pad, max(scans[:, 1].max(), rec["ymax"]) + pad); ax.set_aspect("equal")
+        inv = "no inventory" if stems is None else f"{rec['inventory_stems_inside']} of {rec['inventory_stems']} stems"
+        ax.set_title(f"{site}: turned {rec['angle_deg']:+.1f} deg\n{inv}, {rec['scan_positions_inside']} of {rec['scan_positions']} positions", fontsize=9, loc="left")
+        ax.tick_params(labelsize=7)
+        # the box as JSON (read by project.plot_box) and as a GeoJSON polygon (project frame, not a geographic CRS)
         meta = project.stage(site, "99_meta"); project.jsave(rec, meta / f"{site}_99_plot_bounds.json")
-        ring = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
         (meta / f"{site}_99_plot_bounds.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [
-            {"type": "Feature", "properties": {"site": site, "frame": "project", "definition": how}, "geometry": {"type": "Polygon", "coordinates": [ring]}}]}))
-        log(f"{site}: {x1 - x0:.1f} x {y1 - y0:.1f} m, {how}")
-    if figure: axs[0, 0].legend(loc="lower left", fontsize=8); fig.tight_layout(); fig.savefig(ROOT / f"{ROOT.name}_plot_bounds_check.png", dpi=110, facecolor="#fcfcfb")
+            {"type": "Feature", "properties": {"site": site, "frame": "project", "definition": rec["definition"]}, "geometry": {"type": "Polygon", "coordinates": [ring]}}]}))
+        log(f"{site}: {rec['definition']}; {inv}, {rec['scan_positions_inside']} of {rec['scan_positions']} scan positions inside")
+    if figure: axs[0, 0].legend(loc="lower left", fontsize=7, framealpha=0.9); fig.tight_layout(); fig.savefig(ROOT / f"{ROOT.name}_plot_bounds_check.png", dpi=110, facecolor="#fcfcfb")
     plt.close(fig)
 
 
-def clip_raster(src, dst, xy):
-    """Clip the GeoTIFF src to the box xy = (xmin, ymin, xmax, ymax) and write it to dst with the same profile.
+def clip_raster(src, dst, corners):
+    """Clip the GeoTIFF src to the box with these corners and write it to dst with the same profile.
 
-    The window is snapped to whole cells, so the clip may reach up to half a cell beyond the box. Returns the clipped band
-    as float with nodata as NaN (row 0 north, as rasterio reads it).
+    The window is the cells around the box (snapped to whole cells); cells whose centre is outside the box are set to
+    nodata (NaN when src has none). Returns the clipped band as float with nodata as NaN (row 0 north, as rasterio reads it).
     """
     import rasterio
     from rasterio.windows import from_bounds
+    c = np.asarray(corners, float); xy = (c[:, 0].min(), c[:, 1].min(), c[:, 0].max(), c[:, 1].max())
     with rasterio.open(src) as r:
-        w = from_bounds(*xy, transform=r.transform).round_offsets().round_lengths(); a = r.read(1, window=w); prof = r.profile.copy()
-        prof.update(width=a.shape[1], height=a.shape[0], transform=r.window_transform(w))
-        with rasterio.open(dst, "w", **prof) as o: o.write(a, 1)
-        nod = r.nodata
-    a = a.astype(float)
+        w = from_bounds(*xy, transform=r.transform).round_offsets().round_lengths(); a = r.read(1, window=w).astype(float); prof = r.profile.copy()
+        tr = r.window_transform(w); nod = r.nodata
     if nod is not None: a[a == nod] = np.nan
+    cx = tr.c + (np.arange(a.shape[1]) + 0.5) * tr.a; cy = tr.f + (np.arange(a.shape[0]) + 0.5) * tr.e   # cell centres
+    X, Y = np.meshgrid(cx, cy); a[~project.in_box(c, X, Y)] = np.nan
+    prof.update(width=a.shape[1], height=a.shape[0], transform=tr, dtype="float32", nodata=np.nan)
+    with rasterio.open(dst, "w", **prof) as o: o.write(a.astype(np.float32), 1)
     return a
 
 
@@ -131,10 +238,9 @@ def manual_trees(site, area_ha):
     without a sylva DBH count towards the density but not the basal area. area_ha: the box area. Returns the dict of
     manual_* values merged into the clip record (trees/ha, m2/ha, median DBH in cm).
     """
-    x0, y0, x1, y1 = project.plot_bounds(site)
     q = {int(r["treeid"]): r["sylva_dbh_m"] for r in csv.DictReader(open(ROOT / site / "08_qsm" / f"{site}_08_sylva_trees.csv"))}; d = []   # tree id -> DBH (m) as text
     for r in csv.DictReader(open(ROOT / site / "07_trees" / f"{site}_07_trees_vs_plot.csv")):
-        if x0 <= float(r["centroid_x"]) <= x1 and y0 <= float(r["centroid_y"]) <= y1:
+        if project.in_plot(site, float(r["centroid_x"]), float(r["centroid_y"])):
             try: d.append(float(q.get(int(r["treeid"]), "nan")))
             except ValueError: d.append(np.nan)                          # empty DBH: no sylva QSM for the tree
     d = np.array(d); ok = d[np.isfinite(d)]
@@ -150,17 +256,17 @@ def clip(site, laz=True):
     99_meta/<PLOT>_99_plot_clip.json. The full-extent products are left as they are.
     """
     from sylva import io
-    t0 = time.time(); r_ = ROOT / site; xy = project.plot_bounds(site); x0, y0, x1, y1 = xy
-    rec = {"site": site, "plot_bounds": {"xmin": x0, "ymin": y0, "xmax": x1, "ymax": y1}, "area_ha": (x1 - x0) * (y1 - y0) / 1e4}
+    t0 = time.time(); r_ = ROOT / site; box = project.plot_box(site); inside = lambda x, y: project.in_box(box, x, y)
+    rec = {"site": site, "plot_bounds": {"corners": box.round(3).tolist()}, "area_ha": project.box_area_ha(box)}
 
     # rasters: canopy cover is the share of CHM cells at or above 2 m inside the box
-    dtm = clip_raster(r_ / "05_ground" / f"{site}_05_dtm_1m.tif", r_ / "05_ground" / f"{site}_05_dtm_1m_plot.tif", xy)
-    chm = clip_raster(r_ / "05_ground" / f"{site}_05_chm_0.5m.tif", r_ / "05_ground" / f"{site}_05_chm_0.5m_plot.tif", xy)
+    dtm = clip_raster(r_ / "05_ground" / f"{site}_05_dtm_1m.tif", r_ / "05_ground" / f"{site}_05_dtm_1m_plot.tif", box)
+    chm = clip_raster(r_ / "05_ground" / f"{site}_05_chm_0.5m.tif", r_ / "05_ground" / f"{site}_05_chm_0.5m_plot.tif", box)
     if np.isfinite(chm).any(): rec.update(chm_cover_2m_pct=float(100 * np.nanmean(chm >= 2.0)), chm_p95_m=float(np.nanpercentile(chm, 95)))
     rec["dtm_range_m"] = [float(np.nanmin(dtm)), float(np.nanmax(dtm))]
 
     # automatic stems (06) inside the box, with their density and basal area (kept for comparison; they over-count)
-    rows = list(csv.DictReader(open(r_ / "06_stems" / f"{site}_06_stems.csv"))); keep = [r for r in rows if x0 <= float(r["x"]) <= x1 and y0 <= float(r["y"]) <= y1]
+    rows = list(csv.DictReader(open(r_ / "06_stems" / f"{site}_06_stems.csv"))); keep = [r for r in rows if inside(float(r["x"]), float(r["y"]))]
     with open(r_ / "06_stems" / f"{site}_06_stems_plot.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(keep)
     dbh = np.array([float(r["dbh"]) for r in keep]); dbh = dbh[np.isfinite(dbh)]
@@ -173,7 +279,7 @@ def clip(site, laz=True):
     if files:
         out = []
         for p in files:
-            c = io.read(p); x, y = c.xyz[:, 0], c.xyz[:, 1]; share = 1 - ((x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)).mean()
+            c = io.read(p); x, y = c.xyz[:, 0], c.xyz[:, 1]; share = 1 - inside(x, y).mean()
             out.append({"treeid": int(Path(p).stem.split("_")[-1]), "centroid_x": round(float(x.mean()), 2), "centroid_y": round(float(y.mean()), 2), "n_points": len(x),
                         "share_outside": round(float(share), 4), "status": "inside" if share == 0 else ("outside" if share == 1 else "partly_outside")})
         out.sort(key=lambda d: d["treeid"])
@@ -186,7 +292,7 @@ def clip(site, laz=True):
     if laz:
         tmp = project.SCRATCH / "clip" / site; tmp.mkdir(parents=True, exist_ok=True); parts = []; n_in = n_all = 0
         for t in project.merged_tiles(site):
-            c = io.read(t); x, y = c.xyz[:, 0], c.xyz[:, 1]; n_all += len(x); m = (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+            c = io.read(t); x, y = c.xyz[:, 0], c.xyz[:, 1]; n_all += len(x); m = inside(x, y)
             if m.any(): p = tmp / Path(t).name; io.write(c[m], p); parts.append(str(p)); n_in += int(m.sum())
         io.write_concat(parts, r_ / "04_registered" / f"{site}_04_merged_2cm_plot.laz"); shutil.rmtree(tmp)
         rec.update(merged_points_all=n_all, merged_points_plot=n_in)
