@@ -13,6 +13,7 @@ source = "riscan"                       # riscan: the RiSCAN PRO project in <PLO
 # riscan = "{plot}/00_raw/MyPlot.RiSCAN"  # the project, if 00_raw holds more than one *.RiSCAN folder
 registration = "sop"                    # sop: the project's SOP matrices; coreg: sylva.coreg from them; previous: previous_transforms
 # filter = "filters/point_filter.txt"   # point filter file (range, reflectance, deviation, amplitude, omit); none by default
+ground = { method = "pmf", cell_size = 2.0, max_window = 40.0 }   # stage-05 ground filter (sylva.ground.classify_ground_<method> keywords)
 # previous_transforms = "{plot}/03_registration/delivered_transforms.json"   # scans[].name, world_from_scan (4x4)
 # manual_trees = "../trees/{plot}"      # one point cloud per tree (.ply/.las/.laz), transferred in stage 07
 segment_trees = true                    # plots without manual trees are segmented automatically (stage 07); false: no tree stages
@@ -36,4 +37,5 @@ name = "Plot A"
 registration = "coreg"
 no_prior = ["ScanPos012"]               # scans whose SOP is wrong: coreg places them without it
 unregistered = ["tilt 003"]             # scans in the project that were never registered
+ground = { method = "csf", cloth_resolution = 1.0, rigidness = 1 }   # steep terrain: PMF cut banks away (scanners well above the DTM)
 manual_trees = "../trees/{plot}"

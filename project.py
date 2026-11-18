@@ -55,7 +55,9 @@ PYARROW_PYTHON = str(_path(_paths["pyarrow_python"])) if "pyarrow_python" in _pa
 # per-plot settings and their defaults: [defaults] in project.toml overrides these, [plots.<NAME>] overrides both (setting())
 DEFAULTS = {"source": "riscan", "riscan": None, "registration": "sop", "filter": None, "unregistered": [], "no_prior": [], "previous_transforms": None,
             "segment_trees": True, "manual_trees": None, "manual_trees_table": None, "manual_trees_frame": None, "inventory": None, "inventory_frame": None,
-            "inventory_x": "x", "inventory_y": "y", "code": None, "name": None}
+            "inventory_x": "x", "inventory_y": "y", "code": None, "name": None,
+            # stage-05 ground filter: method "pmf" (sylva.ground.classify_ground_pmf) or "csf" (classify_ground_csf), and its keywords
+            "ground": {"method": "pmf", "cell_size": 2.0, "max_window": 40.0}}
 DEFAULTS.update(CONFIG.get("defaults", {}))
 # the plot box (m): nominal side, how far field stems may lie outside it, the distance beyond which a stem counts as isolated
 PLOT_BOX = {"size_m": 100.0, "tolerance_m": 4.0, "isolated_stem_m": 15.0, **CONFIG.get("plot_box", {})}

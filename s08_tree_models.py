@@ -18,7 +18,7 @@ segfix edit carries leaf/wood classes (leafwood field), points classed by hand k
 in the unclassified ones; a tree whose classes changed has its leaf/wood, leaf metrics and sylva QSM redone.
 All coordinates are in the project frame of the merge (stage 04); heights are above the 1 m DTM of stage 05.
 """
-import colorsys, csv, json, re, subprocess, time, traceback
+import colorsys, csv, hashlib, json, re, subprocess, time, traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -186,6 +186,7 @@ def one_tree(args):
             # keep the tree file and its mesh (<id>_trees_mesh.ply); drop the input cloud and rayextract's segmented cloud
             ply.unlink(); (rct_dir / f"{site}_08_tree_{tid}_segmented.ply").unlink(missing_ok=True)
             s = parse_rct_trees(txt); res.update(s or {"rct_segments": 0}); res["rct_mode"] = "plain"; res["rct_seconds"] = round(time.time() - t0, 1)
+            res["rct_dtm"] = dtm_d["signature"]
             if s and s["rct_base_diameter_m"] > 0.06 * H: res["rct_flag"] = "trunk diameter over 6 % of height: multi-stem clump, model unreliable"
         if do_sylva:
             # stage 09: wood (True) / leaf (False) per point from the graph-based classifier on the full-resolution tree
@@ -195,7 +196,7 @@ def one_tree(args):
                 res.update(class_signature=class_signature(xyz, cls), points_classed_by_hand=int((cls > 0).sum()))
             io.write(cloud.with_attrs(wood=wood.astype(np.uint8), height=h, treeid=np.full(len(cloud), tid, np.uint32), point_source_id=psid.astype(np.uint16)),
                      str(lw_dir / f"{site}_09_tree_{tid}.laz"))
-            res.update(n_wood=int(wood.sum()), n_leaf=int((~wood).sum()), wood_fraction=float(wood.mean()))
+            res.update(n_wood=int(wood.sum()), n_leaf=int((~wood).sum()), wood_fraction=float(wood.mean()), leafwood_dtm=dtm_d["signature"])
             # leaf angles (beta fit and ellipsoidal chi) and one-sided leaf area (0.25 m voxels) need enough leaf points to be stable
             if (~wood).sum() >= 500:
                 lad = leaves.leaf_angle_distribution(cloud.xyz[~wood])
@@ -254,27 +255,33 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
     t0 = time.time(); q = project.stage(site, "08_qsm"); lw = project.stage(site, "09_leafwood")
     rct_dir, syl_dir = q / f"{site}_08_rct", q / f"{site}_08_sylva"; rct_dir.mkdir(exist_ok=True); syl_dir.mkdir(exist_ok=True)
     # shared inputs: scanner origins, the DTM (as plain arrays, to pass to the workers) and its ground mesh for rayextract
-    origins, src = scan_origins(site); dtm = project.load_dtm(site); dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution}
+    origins, src = scan_origins(site); dtm = project.load_dtm(site)
+    # the DTM's signature: a tree's models are redone when the DTM they were made with (rct_dtm, leafwood_dtm in its record;
+    # for records older than those keys, the manifest's dtm_signature, else the current DTM) is not the current one
+    dsig = hashlib.sha1(np.ascontiguousarray(dtm.data).tobytes()).hexdigest()[:16]
+    dtm_d = {"data": dtm.data, "xmin": dtm.xmin, "ymin": dtm.ymin, "resolution": dtm.resolution, "signature": dsig}
     nv, nf = write_ground_mesh(dtm, rct_dir / "ground_mesh.ply")
     trees = collect_trees(site, only); labels = "segfix edit" if project.edited_tiles_dir(site).exists() else "transfer"
     # automatic stems of stage 06 (x, y, DBH in m) for the QSM radius prior
     rows_ = list(csv.DictReader(open(ROOT / site / "06_stems" / f"{site}_06_stems.csv")))
     stems = np.array([[float(r["x"]), float(r["y"]), float(r["dbh"])] for r in rows_]) if rows_ else None
     mf = q / f"{site}_08_models_manifest.json"
-    man = project.jload(mf) or {"site": site, "trees": {}}; man.update(matrices=src, labels=labels, ground_mesh=f"{nv} vertices, {nf} faces from the 1 m DTM")
+    man = project.jload(mf) or {"site": site, "trees": {}}; base = man.get("dtm_signature", dsig); man.update(dtm_signature=base, matrices=src, labels=labels, ground_mesh=f"{nv} vertices, {nf} faces from the 1 m DTM")
     if not only:                                                         # trees removed in segfix
         for t in [t for t in man["trees"] if int(t) not in trees]: remove_tree(site, t); del man["trees"][t]
 
     # Redo logic. A tree's points are unchanged when its recorded signature matches; records written before signatures
     # existed only have n_points, which is then compared with the point count. The rct step is up to date when the points are
     # unchanged and its tree file and volume exist; the sylva step (09 leaf/wood + sylva QSM) also needs unchanged classes.
+    # Both also need the DTM they were made with to be the current one (heights, rayextract's ground mesh).
     def same(t):
         """Whether tree t's points match its manifest record (signature, or point count for older records)."""
         r = man["trees"].get(str(t), {}); return r.get("signature", f"{r.get('n_points')}") in (signature(trees[t][0]), str(len(trees[t][0])))
 
     def rct_ok(t):
         """Whether tree t's raycloudtools model is up to date."""
-        return same(t) and "rct_volume_m3" in man["trees"].get(str(t), {}) and (rct_dir / f"{site}_08_tree_{t}_trees.txt").exists()
+        r = man["trees"].get(str(t), {})
+        return same(t) and "rct_volume_m3" in r and r.get("rct_dtm", base) == dsig and (rct_dir / f"{site}_08_tree_{t}_trees.txt").exists()
 
     def classes_same(t):
         """No class edits since stage 09 ran: the tree's classes match the recorded ones (or, before any were recorded, the 09 file)."""
@@ -286,7 +293,7 @@ def run(site, workers=6, only=None, do_rct=True, do_sylva=True, limit=None):
 
     def sylva_ok(t):
         """Whether tree t's leaf/wood file and sylva QSM (or the note that it has too few wood points) are up to date."""
-        return (same(t) and classes_same(t) and (lw / f"{site}_09_tree_{t}.laz").exists()
+        return (same(t) and classes_same(t) and man["trees"].get(str(t), {}).get("leafwood_dtm", base) == dsig and (lw / f"{site}_09_tree_{t}.laz").exists()
                 and ("sylva_dbh_m" in man["trees"][str(t)] or "sylva_note" in man["trees"][str(t)]))
     todo = [t for t in sorted(trees) if (do_rct and not rct_ok(t)) or (do_sylva and not sylva_ok(t))][:limit]
     log(f"{site}: {len(trees)} trees ({labels}), {sum(len(v[0]) for v in trees.values()):,} points; {len(todo)} to do on {workers} workers")

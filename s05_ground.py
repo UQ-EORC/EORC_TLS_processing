@@ -3,8 +3,10 @@
 usage: s05_ground.py [PLOT ...]
 
 The 2 cm merge (04) is thinned to 5 cm (8 cm above 260 M points). Ground: the lowest points of each 2 m cell (within
--0.3..+0.4 m of the cell's 1st percentile, 10 cm thinned) through sylva.ground.classify_ground_pmf (2 m cells, 40 m
-window); TIN DTM at 1 m with a support raster (plan distance to the nearest ground point); height above the DTM; CHM
+-0.3..+0.4 m of the cell's 1st percentile, 10 cm thinned) through the plot's ground filter (ground in project.toml:
+sylva.ground.classify_ground_pmf with 2 m cells and a 40 m window by default; on steep or broken terrain, where PMF cuts
+banks and spurs away, classify_ground_csf with a loose cloth, e.g. {method = "csf", cloth_resolution = 1.0, rigidness = 1});
+TIN DTM at 1 m with a support raster (plan distance to the nearest ground point); height above the DTM; CHM
 at 0.5 m. Stems: sylva.trees.detect_stems on the 0.5-3 m slab, with per-scan stem noise (sylva.quality.stem_noise).
 The automatic stems over-count and inflate DBH; plot basal area and density come from the segmented trees after editing (s99_plot.py).
   05_ground/<PLOT>_05_dtm_1m.tif, _dtm_support_1m.tif, _chm_0.5m.tif
@@ -69,9 +71,12 @@ def run(site):
            "source": f"04_registered/{site}_04_merged_2cm_tiles ({n_tiles} tiles, {merge['points_merged']:,} points), thinned to {voxel * 100:g} cm",
            "matrices": merge.get("matrices"), "scans_used": len(merge["scans_used"]), "frame": "project coordinates", "points_used": len(cloud), "voxel_m": voxel}
     log(f"{site}: {len(cloud):,} points at {voxel * 100:g} cm from {n_tiles} tiles")
-    # Ground: the morphological filter on the low-point candidates; gp are the points it classes as ground (LAS class 2).
+    # Ground: the plot's ground filter on the low-point candidates; gp are the points it classes as ground (LAS class 2).
     # make_dtm triangulates the ground points of g (TIN) onto a 1 m grid.
-    g = ground.classify_ground_pmf(lowest_points(cloud), cell_size=2.0, max_window=40.0); gp = g[g.attrs["classification"] == 2]
+    gset = dict(project.setting(site, "ground")); method = gset.pop("method", "pmf")
+    if method not in ("pmf", "csf"): raise ValueError(f"{site}: ground method must be \"pmf\" or \"csf\", got {method!r}")
+    classify = ground.classify_ground_csf if method == "csf" else ground.classify_ground_pmf
+    g = classify(lowest_points(cloud), **gset); gp = g[g.attrs["classification"] == 2]; rec["ground_filter"] = {"method": method, **gset}
     dtm = ground.make_dtm(g, resolution=1.0, method="tin"); dtm.to_geotiff(g4 / f"{site}_05_dtm_1m.tif")
     # Support raster: for each DTM cell centre, the plan (2D) distance in m to the nearest ground point. z is set to 0 on
     # both sides so the 3D nearest-neighbour search measures plan distance. Large values mark interpolated terrain.
