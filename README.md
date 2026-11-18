@@ -60,8 +60,9 @@ Notes on the methods:
 - The canopy stages use every pulse. A point filter (reflectance floor, deviation cap) removes pulses whose echoes all
   fail it, which overstates gaps and understates plant area, so stage 02 reads the raw scans without one.
 - The ground filter is PMF (2 m cells, 40 m window) unless a plot sets `ground`. On steep or broken terrain PMF can cut
-  banks and spurs away and the DTM is interpolated under them: check that the scanners stand a tripod's height above the
-  DTM, and if not use CSF with a loose cloth (`ground = { method = "csf", cloth_resolution = 1.0, rigidness = 1 }`).
+  banks and spurs away and the DTM is interpolated under them. Stage 05 checks that every scanner stands about the
+  plot's usual tripod height above the DTM (`scanner_height` in `99_meta/<PLOT>_99_processing.json`) and flags the plot
+  when positions are well off; then use CSF with a loose cloth (`ground = { method = "csf", cloth_resolution = 1.0, rigidness = 1 }`).
 - The automatic stems of stage 06 over-count and inflate DBH; plot density and basal area come from the segmented trees
   after editing, with DBH from their QSMs.
 - The gap-fraction PAI is not meaningful for low, sparse canopy and saturates in dense canopy; use the voxel PAI there.

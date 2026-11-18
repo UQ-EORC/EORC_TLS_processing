@@ -8,6 +8,7 @@ sylva.ground.classify_ground_pmf with 2 m cells and a 40 m window by default; on
 banks and spurs away, classify_ground_csf with a loose cloth, e.g. {method = "csf", cloth_resolution = 1.0, rigidness = 1});
 TIN DTM at 1 m with a support raster (plan distance to the nearest ground point); height above the DTM; CHM
 at 0.5 m. Stems: sylva.trees.detect_stems on the 0.5-3 m slab, with per-scan stem noise (sylva.quality.stem_noise).
+Check: each scanner's height above the DTM (a tripod's height); positions far from the plot's median are flagged.
 The automatic stems over-count and inflate DBH; plot basal area and density come from the segmented trees after editing (s99_plot.py).
   05_ground/<PLOT>_05_dtm_1m.tif, _dtm_support_1m.tif, _chm_0.5m.tif
   06_stems/<PLOT>_06_stems.csv
@@ -54,6 +55,31 @@ def lowest_points(cloud, cell=2.0):
     return filters.voxel_downsample(cloud[order[(zs < zlow + 0.4) & (zs > zlow - 0.3)]], 0.1)
 
 
+# Scanner height check: each scanner should stand about a tripod's height above the DTM. A position more than SCANNER_OFF m
+# from the plot's median height is off; the plot is flagged when any is more than SCANNER_BAD m off or more than
+# SCANNER_SHARE of them are off. A DTM interpolated under ground the filter cut away, or a scan registered too high or
+# low, shows up here.
+SCANNER_OFF, SCANNER_BAD, SCANNER_SHARE = 0.5, 1.0, 0.1
+
+
+def scanner_heights(site, dtm):
+    """{scan: height (m) of the scanner above the DTM} for every scan with a matrix (the matrix's translation is the
+    scanner's position, project frame); scanners over DTM holes are left out."""
+    M, _ = project.matrices(site); names = sorted(M)
+    o = np.array([M[n][:3, 3] for n in names]); g = dtm.sample(o[:, 0], o[:, 1])
+    return {n: float(z - gz) for n, z, gz in zip(names, o[:, 2], g) if np.isfinite(gz)}
+
+
+def scanner_check(hs):
+    """The scanner height record for the processing record: median, spread, and the positions off the median."""
+    if not hs: return {"scanners": 0}
+    v = np.array(list(hs.values())); med = float(np.median(v))
+    off = {n: round(x - med, 2) for n, x in hs.items() if abs(x - med) > SCANNER_OFF}
+    return {"scanners": len(hs), "median_m": round(med, 2), "p5_m": round(float(np.percentile(v, 5)), 2), "p95_m": round(float(np.percentile(v, 95)), 2),
+            "off": dict(sorted(off.items(), key=lambda kv: -abs(kv[1]))), "worst_m": round(max((abs(x) for x in off.values()), default=0.0), 2),
+            "flag": bool(off) and (max(abs(x) for x in off.values()) > SCANNER_BAD or len(off) > SCANNER_SHARE * len(hs))}
+
+
 def run(site):
     """Stages 05 and 06 for one plot: DTM, support raster and CHM, automatic stems, QC figures and the processing record.
 
@@ -91,6 +117,9 @@ def run(site):
     rec.update(ground_points=len(gp), dtm_z_min=float(np.nanmin(dtm.data)), dtm_z_max=float(np.nanmax(dtm.data)),
                dtm_cells_with_ground_within_3m_pct=float(100 * (dist <= 3).mean()), height_p999_m=float(np.nanpercentile(h, 99.9)),
                height_max_m=float(np.nanmax(h)), points_below_dtm_pct=float(100 * (h < -0.3).mean()))
+    rec["scanner_height"] = sc = scanner_check(scanner_heights(site, dtm))
+    if sc["scanners"]: log(f"{site}: scanners {sc['median_m']:.2f} m above the DTM (p5 {sc['p5_m']:.2f}, p95 {sc['p95_m']:.2f}); "
+                           f"{len(sc['off'])} more than {SCANNER_OFF:g} m off, worst {sc['worst_m']:.2f} m")
     log(f"{site}: DTM {rec['dtm_z_min']:.1f}..{rec['dtm_z_max']:.1f} m, ground within 3 m in {rec['dtm_cells_with_ground_within_3m_pct']:.0f}% of cells, "
         f"height p99.9 {rec['height_p999_m']:.1f} m, below DTM {rec['points_below_dtm_pct']:.1f}%")
     # Stage 06: automatic stems from the 0.5-3 m slab above the DTM (circle fits; dbh in m, x/y in the project frame).
@@ -114,6 +143,8 @@ def run(site):
     if rec["height_p999_m"] > 80: flags.append("implausible canopy height")
     if rec["dtm_cells_with_ground_within_3m_pct"] < 20: flags.append("little observed ground")
     if not stems: flags.append("no stems detected")
+    if sc.get("flag"): flags.append(f"scanners off the DTM ({len(sc['off'])} positions more than {SCANNER_OFF:g} m from the median "
+                                    f"height, worst {sc['worst_m']:.1f} m): DTM cut away under them, or registration")
     rec["flags"] = flags or ["none"]; rec["status"] = "CHECK" if flags else "PASS (automatic checks only; look at the 90_qc figures)"
     rec["seconds"] = round(time.time() - t0); project.jsave(rec, meta / f"{site}_99_processing.json")
     project.record_run(site, "05_ground", status=rec["status"], stems=len(stems)); log(f"{site}: {rec['status']} ({rec['seconds']} s)")
